@@ -1,11 +1,9 @@
-import ccxt 
+import ccxt
 import time
 import asyncio
 import urllib3
-import concurrent.futures
 from nicegui import run
 from logger import log
-from state import app_state
 from config import DEFAULT_EXCHANGES, DEFAULT_COINS
 
 # Отключаем SSL warnings
@@ -14,15 +12,15 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 exchanges_map = {}
 TASK_STARTED = False 
 
-# === ЗАЩИТА СЕРВЕРА (ЛИМИТЫ) ===
-MAX_THREADS = 10        
-TOP_COINS_LIMIT = 150   
-MARKET_LEADER = 'binance' 
-# ===============================
+# === ГЛОБАЛЬНЫЕ ДАННЫЕ (ОБЩИЕ ДЛЯ ВСЕХ) ===
+# Сюда сканер складывает все найденные связки.
+# Пользователи читают отсюда, применяя свои фильтры.
+GLOBAL_OPPORTUNITIES = []
+GLOBAL_LAST_UPDATE = 0
 
 def init_exchanges_sync():
-    """Синхронная инициализация бирж"""
-    log.info("Connecting to exchanges...")
+    """Инициализация бирж (подключение)"""
+    log.info("Connecting to exchanges (Batch Mode)...")
     fake_headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
@@ -31,237 +29,106 @@ def init_exchanges_sync():
         if eid not in exchanges_map:
             try:
                 exchange_class = getattr(ccxt, eid)
-                exchange = exchange_class({
+                exchanges_map[eid] = exchange_class({
                     'enableRateLimit': True, 
-                    'timeout': 5000, 
-                    'verify': False,   
+                    'timeout': 4000, 
+                    'verify': False, 
                     'headers': fake_headers
                 })
-                exchanges_map[eid] = exchange
             except Exception as e:
                 log.warning(f"Failed to init {eid}: {e}")
     return True
 
-def fetch_top_liquid_coins():
-    """АВТО-СКАНЕР: Загружает ТОП монет по объему"""
-    log.info(f"Auto-fetching TOP-{TOP_COINS_LIMIT} coins by volume from {MARKET_LEADER}...")
+def fetch_tickers_batch_sync(exchange_id, symbols):
+    """
+    ОПТИМИЗАЦИЯ: Забирает цены СРАЗУ ПО ВСЕМ МОНЕТАМ одним запросом.
+    Вместо 50 запросов делаем 1.
+    """
+    ex = exchanges_map.get(exchange_id)
+    if not ex: return exchange_id, {}
+    
     try:
-        leader = getattr(ccxt, MARKET_LEADER)({'timeout': 10000, 'enableRateLimit': True})
-        markets = leader.fetch_tickers()
+        # ccxt fetch_tickers забирает всё сразу
+        tickers = ex.fetch_tickers(symbols)
         
-        sorted_tickers = []
-        for symbol, ticker in markets.items():
-            if '/USDT' in symbol and ticker['quoteVolume'] is not None:
-                sorted_tickers.append({
-                    'symbol': symbol,
-                    'vol': ticker['quoteVolume']
-                })
+        clean_data = {}
+        for sym, data in tickers.items():
+            if data and data['last']:
+                clean_data[sym] = float(data['last'])
         
-        sorted_tickers.sort(key=lambda x: x['vol'], reverse=True)
-        top_usdt_pairs = [x['symbol'] for x in sorted_tickers[:TOP_COINS_LIMIT]]
-        clean_pairs = [p for p in top_usdt_pairs if 'UP/' not in p and 'DOWN/' not in p]
+        return exchange_id, clean_data
         
-        log.info(f"Successfully loaded {len(clean_pairs)} top pairs (Vol Leader: {clean_pairs[0]})")
-        return clean_pairs
     except Exception as e:
-        log.error(f"Failed to fetch top coins: {e}. Using fallback list.")
-        return DEFAULT_COINS
+        # log.debug(f"Batch fetch error {exchange_id}: {e}")
+        return exchange_id, {}
 
-def generate_routing_pairs(base_coins):
-    """Генерирует кросс-пары (BTC, ETH, BNB)"""
-    routing_pairs = []
-    bridges = ['BTC', 'ETH', 'BNB']
+def calculate_global_spreads(prices_cache):
+    """Считает спреды по всем монетам и сохраняет в глобальную переменную"""
+    global GLOBAL_OPPORTUNITIES, GLOBAL_LAST_UPDATE
     
-    for pair in base_coins:
-        try:
-            base = pair.split('/')[0] 
-            for bridge in bridges:
-                if base == bridge: continue 
-                routing_pairs.append(f"{base}/{bridge}")
-        except:
-            continue
-    return list(set(base_coins + routing_pairs))
-
-def get_price_worker(args):
-    """Воркер для получения цены"""
-    exchange, symbol = args
-    try:
-        ticker = exchange.fetch_ticker(symbol)
-        price = ticker['last']
-        vol = ticker.get('quoteVolume') 
-        if vol is None:
-             vol = ticker.get('baseVolume', 0) * price
-
-        if price and price > 0:
-            return {'ex': exchange.id, 'price': float(price), 'vol': float(vol), 'sym': symbol}
-    except Exception:
-        return None
-    return None
-
-def scan_market_sync(selected_exs, selected_cns):
-    active_exs = [exchanges_map[e] for e in selected_exs if e in exchanges_map]
-    if not active_exs: return []
-
-    tasks_args = []
-    for sym in selected_cns:
-        for ex in active_exs:
-            tasks_args.append((ex, sym))
+    temp_list = []
     
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        future_to_url = {executor.submit(get_price_worker, arg): arg for arg in tasks_args}
-        for future in concurrent.futures.as_completed(future_to_url):
-            try:
-                data = future.result()
-                if data: results.append(data)
-            except Exception: pass
-    return results
+    for sym, ex_prices in prices_cache.items():
+        if len(ex_prices) < 2: continue # Нужно минимум 2 биржи
 
-def calculate_chain_routes(raw_data, invest):
-    """
-    Поиск цепочек (Только если включено в настройках)
-    """
-    chains = []
-    min_vol = app_state.get("min_volume", 0)
-    prices_map = {}
-    for item in raw_data:
-        sym = item['sym']
-        ex = item['ex']
-        if sym not in prices_map: prices_map[sym] = {}
-        prices_map[sym][ex] = item
-
-    cross_pairs = [item for item in raw_data if '/USDT' not in item['sym']]
-    
-    for cross in cross_pairs:
-        try:
-            target_coin, bridge_coin = cross['sym'].split('/')
-        except: continue
-            
-        bridge_usdt_sym = f"{bridge_coin}/USDT"
-        target_usdt_sym = f"{target_coin}/USDT"
+        sorted_prices = sorted(ex_prices.items(), key=lambda x: x[1])
+        min_ex, min_p = sorted_prices[0]
+        max_ex, max_p = sorted_prices[-1]
         
-        if bridge_usdt_sym not in prices_map or target_usdt_sym not in prices_map: continue
-            
-        best_bridge_buy = min(prices_map[bridge_usdt_sym].values(), key=lambda x: x['price'])
-        mid_step = cross 
-        best_target_sell = max(prices_map[target_usdt_sym].values(), key=lambda x: x['price'])
-        
-        bottleneck_vol = min(best_bridge_buy['vol'], mid_step['vol'], best_target_sell['vol'])
-        if bottleneck_vol < min_vol: continue
-        
-        amount_bridge = invest / best_bridge_buy['price']
-        amount_target = amount_bridge / mid_step['price'] 
-        final_usdt = amount_target * best_target_sell['price']
-        
-        profit = final_usdt - invest
-        spread = (profit / invest) * 100
-        
-        if spread > -10.0: 
-            chains.append({
-                "symbol": f"{target_coin} (via {bridge_coin})", 
-                "spread": spread,
-                "profit": profit,
-                "buy_price": f"{best_bridge_buy['price']:.2f}", 
-                "sell_price": f"{best_target_sell['price']:.2f}",
-                "buy_ex": f"{best_bridge_buy['ex'].upper()} -> {mid_step['ex'].upper()}",
-                "sell_ex": f"{best_target_sell['ex'].upper()}",
-                "vol": bottleneck_vol
-            })
-    return chains
+        if min_p <= 0: continue
 
-def calculate_logic(raw_data):
-    grouped = {}
-    for item in raw_data:
-        sym = item['sym']
-        if sym not in grouped: grouped[sym] = []
-        grouped[sym].append(item)
-    
-    final_list = []
-    invest = app_state["investment"]
-    min_vol = app_state.get("min_volume", 0) 
+        spread = ((max_p - min_p) / min_p) * 100
+        
+        # Отсекаем явные ошибки (>200%), остальное оставляем для фильтров юзера
+        if spread > 200.0: continue 
 
-    # 1. Всегда считаем прямые связки
-    for sym, prices in grouped.items():
-        if '/USDT' not in sym: continue 
-        if len(prices) > 1:
-            min_p = min(prices, key=lambda x: x['price'])
-            max_p = max(prices, key=lambda x: x['price'])
-            
-            if min_vol > 0:
-                if min_p['vol'] < min_vol or max_p['vol'] < min_vol: continue
-
-            p_buy = float(min_p['price'])
-            p_sell = float(max_p['price'])
-            if p_buy == 0: continue
-            spread = ((p_sell - p_buy) / p_buy) * 100
-            profit = (spread / 100.0) * invest
-            
-            final_list.append({
-                "symbol": sym, "spread": spread, "profit": profit,
-                "buy_price": p_buy, "sell_price": p_sell,
-                "buy_ex": min_p['ex'], "sell_ex": max_p['ex']
-            })
+        temp_list.append({
+            "symbol": sym, 
+            "spread": spread,
+            "buy_price": min_p, "sell_price": max_p,
+            "buy_ex": min_ex, "sell_ex": max_ex
+        })
     
-    # 2. ОПТИМИЗАЦИЯ: Считаем сложные цепочки ТОЛЬКО если включена галочка
-    chain_results = []
-    if app_state.get('include_chains', False):
-        chain_results = calculate_chain_routes(raw_data, invest)
+    # Сортируем: самые жирные спреды сверху
+    temp_list.sort(key=lambda x: x['spread'], reverse=True)
     
-    full_result = final_list + chain_results
-    full_result.sort(key=lambda x: x['spread'], reverse=True)
-    app_state["data"] = full_result
+    GLOBAL_OPPORTUNITIES = temp_list
+    GLOBAL_LAST_UPDATE = time.time()
 
 async def background_task():
+    """Основной цикл сканера"""
     global TASK_STARTED
     if TASK_STARTED: return
     TASK_STARTED = True
 
-    app_state["status_message"] = "Подключение..."
     await run.io_bound(init_exchanges_sync)
+    log.info("🚀 Optimized Engine Started")
     
-    # --- ГИБРИДНАЯ ЗАГРУЗКА ---
-    app_state["status_message"] = "Анализ рынка (Hybrid)..."
-    log.info("Downloading TOP markets data...")
-    
-    # 1. Авто-Топ (Ликвидность)
-    top_coins = await run.io_bound(fetch_top_liquid_coins)
-    
-    # 2. Ручной список (Волатильность/Мемы из config.py)
-    # Объединяем списки, убирая дубликаты
-    combined_coins = list(set(top_coins + DEFAULT_COINS))
-    
-    # 3. Генерируем пути
-    full_list = generate_routing_pairs(combined_coins)
-    
-    app_state["selected_coins"] = full_list
-    log.info(f"Total pairs to scan: {len(full_list)} (Top + Manual)")
-    # --------------------------
+    # Локальный кэш цен для цикла
+    local_prices = {} 
 
-    app_state["exchanges_ready"] = True
-    app_state["status_message"] = "Готово"
-    log.info("System Ready. Auto-mining enabled.")
-    
-    try:
-        while True:
-            current_exs = app_state["selected_exchanges"]
-            current_cns = app_state["selected_coins"]
+    while True:
+        try:
+            tasks = []
+            # Сканируем ВСЕ биржи параллельно
+            for eid in DEFAULT_EXCHANGES:
+                if eid in exchanges_map:
+                    tasks.append(run.io_bound(fetch_tickers_batch_sync, eid, DEFAULT_COINS))
             
-            if current_exs and current_cns:
-                start_t = time.time()
-                raw_data = await run.io_bound(scan_market_sync, current_exs, current_cns)
+            # По мере поступления ответов обновляем цены
+            for future in asyncio.as_completed(tasks):
+                ex_id, new_prices = await future
                 
-                if raw_data:
-                    calculate_logic(raw_data)
-                    app_state["last_update_ts"] = time.time()
-                    elapsed = time.time() - start_t
-                    mode = "SIMPLE+CHAIN" if app_state.get('include_chains') else "SIMPLE"
-                    log.info(f"Cycle [{mode}]: {elapsed:.2f}s | Found: {len(app_state['data'])} ops")
-                else:
-                    log.warning("No data found")
-
-            await asyncio.sleep(app_state["refresh_rate"])
+                if new_prices:
+                    for sym, price in new_prices.items():
+                        if sym not in local_prices: local_prices[sym] = {}
+                        local_prices[sym][ex_id] = price
+                    
+                    # Пересчитываем таблицу сразу, как пришли данные
+                    calculate_global_spreads(local_prices)
             
-    except asyncio.CancelledError:
-        log.info("Stopping...")
-    except Exception as e:
-        log.error(f"Critical Backend Error: {e}")
+            await asyncio.sleep(1) # Короткая пауза, чтобы не душить API
+            
+        except Exception as e:
+            log.error(f"Core Loop Error: {e}")
+            await asyncio.sleep(5)

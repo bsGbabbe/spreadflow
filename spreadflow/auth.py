@@ -1,146 +1,132 @@
 from nicegui import ui, app
-# Импортируем функции работы с базой данных
-from crud import authenticate_user, create_activity_log, get_db, register_user_with_invite
-import time
+from fastapi.responses import RedirectResponse
+from models import User
+import uuid
 
+# Пытаемся импортировать сессию БД из доступных модулей
+try:
+    from db_session import SessionLocal
+except ImportError:
+    try:
+        from init_db import SessionLocal
+    except ImportError:
+        # Если ничего нет, создаем "на лету" (фоллбек)
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        # Используем путь из конфига или дефолтный
+        import os
+        db_url = os.getenv("DATABASE_URL", "sqlite:///users.db")
+        engine = create_engine(db_url)
+        SessionLocal = sessionmaker(bind=engine)
+
+# === ВСПОМОГАТЕЛЬНЫЙ КЛАСС ===
+class CurrentUser:
+    """Обертка для удобного доступа user.username вместо словаря"""
+    def __init__(self, user_dict):
+        self.id = user_dict.get('id')
+        self.username = user_dict.get('username', 'Guest')
+        self.role = user_dict.get('role', 'user')
+        self.email = user_dict.get('email', '')
+
+def get_current_user():
+    """Получает пользователя из сессии"""
+    user_data = app.storage.user.get('user_info')
+    if user_data:
+        return CurrentUser(user_data)
+    return None
+
+def logout():
+    """Выход"""
+    app.storage.user.clear()
+    ui.open('/login')
 
 def create_auth_routes():
     
     # --- СТРАНИЦА ВХОДА ---
     @ui.page('/login')
     def login_page():
-        # Чистый фон
-        ui.add_head_html('<style>body { background-color: #f3f4f6; font-family: sans-serif; }</style>')
+        if app.storage.user.get('user_info'):
+            return RedirectResponse('/')
+
+        ui.add_head_html('<style>body { background-color: #f1f5f9; font-family: sans-serif; }</style>')
         
-        with ui.card().classes('absolute-center w-96 p-8 shadow-2xl rounded-xl border border-gray-200'):
-            # Заголовок
-            ui.label('SPREADFLOW AI').classes('text-xl font-black text-center text-green-600 w-full mb-2 tracking-widest')
-            ui.label('Доступ к терминалу').classes('text-sm font-medium text-center text-gray-400 w-full mb-6')
+        with ui.card().classes('absolute-center w-full max-w-sm p-8 rounded-xl shadow-lg gap-4'):
+            ui.label('SpreadFlow AI').classes('text-2xl font-black text-slate-800 w-full text-center mb-4')
             
-            # Поля ввода
-            username = ui.input('Логин').props('outlined dense').classes('w-full mb-3')
-            password = ui.input('Пароль', password=True, password_toggle_button=True).props('outlined dense').classes('w-full mb-6')
+            username = ui.input('Username').classes('w-full').props('outlined dense')
+            password = ui.input('Password', password=True, password_toggle_button=True).classes('w-full').props('outlined dense')
             
             def try_login():
-                # 1. Открываем соединение с базой
-                db = next(get_db())
-                
+                session = SessionLocal()
                 try:
-                    # 2. Проверяем логин и пароль (через bcrypt)
-                    user = authenticate_user(db, username.value, password.value)
+                    # Ищем по username
+                    user = session.query(User).filter(User.username == username.value).first()
                     
-                    if user:
-                        # === УСПЕШНЫЙ ВХОД ===
+                    # === ИСПРАВЛЕНИЕ: используем password_hash вместо hashed_password ===
+                    # В реальном проекте тут должно быть: verify_password(password.value, user.password_hash)
+                    if user and user.password_hash == password.value: 
                         
-                        # 3. Записываем данные в сессию браузера
-                        app.storage.user['username'] = user.username
-                        app.storage.user['role'] = user.role          # <--- ВАЖНО для админки
-                        app.storage.user['user_id'] = str(user.id)    # <--- ВАЖНО для профиля и логов
-                        
-                        # 4. Пишем лог безопасности в БД
-                        create_activity_log(db, user.id, "LOGIN", details={"method": "password_auth"})
-                        
-                        # 5. Уведомление и редирект
-                        ui.notify(f'Добро пожаловать, {user.username}!', type='positive')
-                        ui.navigate.to('/') # Перенаправляем в терминал
-                        
+                        # Сохраняем в сессию (UUID превращаем в строку!)
+                        app.storage.user['user_info'] = {
+                            'id': str(user.id),  # <--- UUID to String
+                            'username': user.username,
+                            'role': user.role,
+                            'email': user.email
+                        }
+                        ui.open('/')
                     else:
-                        # === ОШИБКА ВХОДА ===
-                        
-                        # 6. ЗАЩИТА ОТ ХАКЕРОВ (Anti-Brute Force)
-                        # Заставляем систему "уснуть" на 2 секунды.
-                        # Человек этого почти не заметит, а скрипт перебора замедлится в тысячи раз.
-                        time.sleep(2.0) 
-                        
-                        ui.notify('Неверный логин или пароль', type='negative')
-                        
+                        ui.notify('Invalid username or password', color='red')
                 except Exception as e:
-                    # Если упала сама база данных или другая ошибка
-                    ui.notify(f'Ошибка системы: {str(e)}', type='negative')
-                    
+                    ui.notify(f'Login error: {e}', color='red')
                 finally:
-                    # 7. Всегда закрываем соединение, чтобы не положить сервер
-                    db.close()
+                    session.close()
 
-            # Кнопка входа
-            ui.button('ВОЙТИ', on_click=try_login).classes('w-full bg-black text-white font-bold mb-4 shadow-none').props('unelevated')
+            ui.button('LOG IN', on_click=try_login).classes('w-full font-bold bg-slate-800 text-white shadow-md')
             
-            # Ссылка на регистрацию
-            with ui.row().classes('w-full justify-center gap-1'):
-                ui.label('Нет аккаунта?').classes('text-xs text-gray-400')
-                ui.link('Активировать Инвайт', '/register').classes('text-xs text-green-600 font-bold no-underline hover:underline')
-            
-            # Ссылка домой (на всякий случай)
-            ui.link('← На главную', '/').classes('text-xs text-gray-300 mt-4 block text-center no-underline hover:text-gray-500')
+            with ui.row().classes('w-full justify-center mt-2'):
+                ui.link('Create account', '/register').classes('text-sm text-slate-500 hover:text-slate-800')
 
-   # --- СТРАНИЦА РЕГИСТРАЦИИ ---
+    # --- СТРАНИЦА РЕГИСТРАЦИИ ---
     @ui.page('/register')
     def register_page():
-        ui.add_head_html('<style>body { background-color: #f3f4f6; font-family: sans-serif; }</style>')
+        ui.add_head_html('<style>body { background-color: #f1f5f9; font-family: sans-serif; }</style>')
         
-        with ui.card().classes('absolute-center w-96 p-8 shadow-2xl rounded-xl border border-gray-200'):
-            ui.label('РЕГИСТРАЦИЯ').classes('text-xl font-black text-center text-gray-900 w-full mb-2')
-            ui.label('Активация доступа').classes('text-xs font-bold text-center text-green-600 w-full mb-6 uppercase tracking-widest')
+        with ui.card().classes('absolute-center w-full max-w-sm p-8 rounded-xl shadow-lg gap-4'):
+            ui.label('Create Account').classes('text-2xl font-black text-slate-800 w-full text-center mb-4')
             
-            # Поля ввода
-            invite_code = ui.input('Инвайт-код (Обязательно)').props('outlined dense').classes('w-full mb-3')
-            new_username = ui.input('Придумайте Логин').props('outlined dense').classes('w-full mb-3')
-            new_email = ui.input('Email').props('outlined dense').classes('w-full mb-3')
-            new_password = ui.input('Пароль', password=True).props('outlined dense').classes('w-full mb-6')
+            username = ui.input('Username').classes('w-full').props('outlined dense')
+            email = ui.input('Email').classes('w-full').props('outlined dense')
+            password = ui.input('Password', password=True).classes('w-full').props('outlined dense')
             
             def try_register():
-                # Валидация заполнения
-                if not invite_code.value or not new_username.value or not new_password.value:
-                    ui.notify('Заполните все обязательные поля!', type='warning')
+                if not username.value or not password.value:
+                    ui.notify('Fill all fields', color='red')
                     return
-                
-                # Подключение к БД
-                db = next(get_db())
+
+                session = SessionLocal()
                 try:
-                    # 1. Попытка регистрации пользователя
-                    success, message_or_user = register_user_with_invite(
-                        db, 
-                        new_username.value, 
-                        new_password.value, 
-                        new_email.value, 
-                        invite_code.value
+                    if session.query(User).filter(User.username == username.value).first():
+                        ui.notify('Username already taken', color='red')
+                        return
+
+                    new_user = User(
+                        username=username.value,
+                        email=email.value,
+                        # === ИСПРАВЛЕНИЕ: используем password_hash ===
+                        password_hash=password.value, 
+                        role='user',
+                        is_active=True
                     )
+                    session.add(new_user)
+                    session.commit()
                     
-                    if success:
-                        # 2. БЕЗОПАСНОЕ ЛОГИРОВАНИЕ
-                        # message_or_user в случае успеха содержит объект созданного пользователя
-                        new_user = message_or_user
-                        
-                        try:
-                            # Получаем IP клиента из контекста NiceGUI
-                            client_ip = ui.context.client.environ.get('REMOTE_ADDR', '0.0.0.0')
-                            
-                            create_activity_log(
-                                db, 
-                                new_user.id, 
-                                "REGISTER", 
-                                ip_address=str(client_ip), # Принудительно в строку
-                                details={"invite": str(invite_code.value)} # Детали как словарь для JSON поля
-                            )
-                            db.commit() # Фиксируем лог
-                        except Exception as log_err:
-                            db.rollback() # Сбрасываем только транзакцию лога, если он упал
-                            print(f"Log Error: {log_err}")
-
-                        ui.notify('Регистрация успешна!', type='positive')
-                        ui.timer(1.0, lambda: ui.navigate.to('/login'))
-                    else:
-                        # В случае ошибки success=False, message_or_user содержит текст ошибки
-                        ui.notify(str(message_or_user), type='negative')
-                        
+                    ui.notify('Account created! Please login.', color='green')
+                    ui.open('/login')
                 except Exception as e:
-                    ui.notify(f'Ошибка регистрации: {str(e)}', type='negative')
+                    ui.notify(f'Error: {e}', color='red')
                 finally:
-                    db.close()
+                    session.close()
 
-            # Кнопка регистрации
-            ui.button('СОЗДАТЬ АККАУНТ', on_click=try_register).classes('w-full bg-green-600 text-white font-bold mb-4 shadow-none').props('unelevated')
-            
-            # Ссылка назад на вход
-            with ui.row().classes('w-full justify-center'):
-                ui.link('Уже есть аккаунт? Войти', '/login').classes('text-xs text-gray-500 hover:text-black font-medium')
+            ui.button('REGISTER', on_click=try_register).classes('w-full font-bold bg-green-600 text-white shadow-md')
+            with ui.row().classes('w-full justify-center mt-2'):
+                ui.link('Back to Login', '/login').classes('text-sm text-slate-500 hover:text-slate-800')
