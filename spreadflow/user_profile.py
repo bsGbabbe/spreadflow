@@ -4,11 +4,16 @@ from crud import get_db, get_user_by_username, get_user_plan
 def create_profile_route():
     @ui.page('/profile')
     def profile_page():
-        # 1. Проверка сессии
-        username = app.storage.user.get('username')
-        if not username:
+        # === ИСПРАВЛЕНИЕ: Берем данные из user_info ===
+        user_info = app.storage.user.get('user_info')
+        if not user_info:
             ui.navigate.to('/login')
             return
+            
+        username = user_info.get('username')
+        if not username:
+             ui.navigate.to('/login')
+             return
 
         # 2. Загрузка данных из Postgres
         db = next(get_db())
@@ -31,8 +36,6 @@ def create_profile_route():
             db.close()
 
         # --- ДАЛЬШЕ ИДЕТ ДИЗАЙН (CSS) ---
-        # (Код стилей остается тем же, что и был, меняем только переменные ниже)
-        
         ui.add_head_html('''
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Roboto+Mono:wght@500;700&display=swap');

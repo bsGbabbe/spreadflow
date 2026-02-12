@@ -1,22 +1,26 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Dict
+from config import DEFAULT_EXCHANGES
 
-# Глобальные настройки по умолчанию (для сброса)
-DEFAULT_INVESTMENT = 0     
-DEFAULT_SPREAD = 0.0       
+# Настройки по умолчанию
+DEFAULT_INVESTMENT = 1000  
+# Диапазон спреда: от 0.5% до 20%
+DEFAULT_SPREAD_RANGE = {'min': 0.1, 'max': 999.0}
 
 @dataclass
 class UserState:
     """
-    Личное состояние пользователя (фильтры).
-    Создается новое для каждой сессии браузера.
+    Личное состояние пользователя.
     """
     investment: float = DEFAULT_INVESTMENT
-    target_spread: float = DEFAULT_SPREAD
     
-    # Списки выбранных бирж и монет
-    selected_exchanges: List[str] = field(default_factory=list)
-    selected_coins: List[str] = field(default_factory=list)
+    # === ИЗМЕНЕНИЕ: Теперь храним MIN и MAX ===
+    spread_range: Dict[str, float] = field(default_factory=lambda: DEFAULT_SPREAD_RANGE.copy())
     
-    # Флаг: включил ли пользователь отображение у себя
-    is_running: bool = False
+    # Биржи берем из конфига
+    selected_exchanges: List[str] = field(default_factory=lambda: DEFAULT_EXCHANGES.copy())
+    
+    # Список монет
+    selected_coins: List[str] = field(default_factory=list) 
+    
+    is_running: bool = True

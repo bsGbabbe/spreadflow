@@ -2,18 +2,18 @@ from nicegui import ui, app
 from fastapi.responses import RedirectResponse
 from models import User
 import uuid
+import bcrypt  # <--- Для проверки хешей паролей
 
-# Пытаемся импортировать сессию БД из доступных модулей
+# Пытаемся импортировать сессию БД
 try:
     from db_session import SessionLocal
 except ImportError:
     try:
         from init_db import SessionLocal
     except ImportError:
-        # Если ничего нет, создаем "на лету" (фоллбек)
+        # Фоллбек для локальных тестов
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
-        # Используем путь из конфига или дефолтный
         import os
         db_url = os.getenv("DATABASE_URL", "sqlite:///users.db")
         engine = create_engine(db_url)
@@ -38,7 +38,8 @@ def get_current_user():
 def logout():
     """Выход"""
     app.storage.user.clear()
-    ui.open('/login')
+    # ИСПРАВЛЕНО: ui.open -> ui.navigate.to
+    ui.navigate.to('/login')
 
 def create_auth_routes():
     
@@ -59,23 +60,28 @@ def create_auth_routes():
             def try_login():
                 session = SessionLocal()
                 try:
-                    # Ищем по username
+                    # Ищем пользователя
                     user = session.query(User).filter(User.username == username.value).first()
                     
-                    # === ИСПРАВЛЕНИЕ: используем password_hash вместо hashed_password ===
-                    # В реальном проекте тут должно быть: verify_password(password.value, user.password_hash)
-                    if user and user.password_hash == password.value: 
+                    if user:
+                        # Проверяем хеш пароля (безопасный вход)
+                        input_bytes = password.value.encode('utf-8')
+                        hash_bytes = user.password_hash.encode('utf-8')
                         
-                        # Сохраняем в сессию (UUID превращаем в строку!)
-                        app.storage.user['user_info'] = {
-                            'id': str(user.id),  # <--- UUID to String
-                            'username': user.username,
-                            'role': user.role,
-                            'email': user.email
-                        }
-                        ui.open('/')
-                    else:
-                        ui.notify('Invalid username or password', color='red')
+                        if bcrypt.checkpw(input_bytes, hash_bytes):
+                            # Сохраняем сессию
+                            app.storage.user['user_info'] = {
+                                'id': str(user.id),
+                                'username': user.username,
+                                'role': user.role,
+                                'email': user.email
+                            }
+                            # ИСПРАВЛЕНО: ui.open -> ui.navigate.to
+                            ui.navigate.to('/')
+                            return 
+                    
+                    ui.notify('Invalid username or password', color='red')
+                    
                 except Exception as e:
                     ui.notify(f'Login error: {e}', color='red')
                 finally:
@@ -109,11 +115,15 @@ def create_auth_routes():
                         ui.notify('Username already taken', color='red')
                         return
 
+                    # Хешируем пароль при регистрации
+                    pwd_bytes = password.value.encode('utf-8')
+                    salt = bcrypt.gensalt()
+                    hashed_pw = bcrypt.hashpw(pwd_bytes, salt).decode('utf-8')
+
                     new_user = User(
                         username=username.value,
                         email=email.value,
-                        # === ИСПРАВЛЕНИЕ: используем password_hash ===
-                        password_hash=password.value, 
+                        password_hash=hashed_pw, 
                         role='user',
                         is_active=True
                     )
@@ -121,7 +131,8 @@ def create_auth_routes():
                     session.commit()
                     
                     ui.notify('Account created! Please login.', color='green')
-                    ui.open('/login')
+                    # ИСПРАВЛЕНО: ui.open -> ui.navigate.to
+                    ui.navigate.to('/login')
                 except Exception as e:
                     ui.notify(f'Error: {e}', color='red')
                 finally:
