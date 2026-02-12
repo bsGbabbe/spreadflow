@@ -4,13 +4,12 @@ from crud import (
     get_all_invites, create_invite_db, delete_invite_db,
     get_recent_logs, get_all_plans, update_plan_details, 
     create_new_plan, delete_plan_db, get_user_active_sub, 
-    update_user_subscription_settings
+    update_user_admin_settings, get_user_by_id # Импортировали новую функцию
 )
 
 def create_admin_routes():
     @ui.page('/admin')
     def admin_dashboard():
-        # === ИСПРАВЛЕНИЕ: Проверяем роль через user_info ===
         user_info = app.storage.user.get('user_info')
         if not user_info or user_info.get('role') != 'admin':
             ui.navigate.to('/')
@@ -20,12 +19,7 @@ def create_admin_routes():
         <style>
             body { background-color: #f1f5f9; font-family: 'Inter', sans-serif; }
             .admin-card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
-            
-            /* Стили карточек тарифов */
-            .pricing-card-admin { 
-                border: 1px solid #e2e8f0; border-radius: 16px; background: white;
-                transition: transform 0.2s; display: flex; flex-direction: column;
-            }
+            .pricing-card-admin { border: 1px solid #e2e8f0; border-radius: 16px; background: white; transition: transform 0.2s; display: flex; flex-direction: column; }
             .pricing-card-admin:hover { transform: translateY(-3px); box-shadow: 0 10px 20px rgba(0,0,0,0.08); }
         </style>
         ''')
@@ -34,17 +28,14 @@ def create_admin_routes():
         stats = get_dashboard_stats(db)
         db.close()
 
-        # --- HEADER ---
         with ui.header().classes('bg-slate-900 text-white px-8 py-4 flex justify-between items-center shadow-lg'):
             with ui.row().classes('items-center gap-3'):
                 ui.icon('admin_panel_settings', size='md', color='blue-400')
                 ui.label('GOD MODE').classes('font-black tracking-widest text-lg')
             ui.button('EXIT', icon='logout', on_click=lambda: ui.navigate.to('/')).props('flat color=white dense')
 
-        # --- CONTENT ---
         with ui.column().classes('w-full p-8 max-w-7xl mx-auto gap-8'):
             
-            # TABS
             with ui.tabs().classes('w-full bg-white rounded-t-xl text-slate-900 border-b') as tabs:
                 t_users = ui.tab('Пользователи', icon='group')
                 t_plans = ui.tab('Тарифы', icon='store')
@@ -63,24 +54,38 @@ def create_admin_routes():
                         user_edit_dialog.clear()
                         db = next(get_db())
                         
+                        # 1. Данные подписки
                         sub = get_user_active_sub(db, user_id)
                         current_plan = sub.plan_name if sub else 'FREE'
                         current_overrides = sub.custom_overrides if (sub and sub.custom_overrides) else {}
                         
                         custom_spread = current_overrides.get('max_spread')
                         custom_speed = current_overrides.get('refresh_rate')
+                        
+                        # 2. Данные самого пользователя (Роль, Статус)
+                        user_obj = get_user_by_id(db, user_id)
+                        current_role = user_obj.role
+                        current_verified = user_obj.is_verified
+                        current_active = user_obj.is_active
+                        
                         db.close()
 
                         with user_edit_dialog, ui.card().classes('w-96'):
-                            ui.label(f'Настройки: {username}').classes('text-lg font-bold mb-2')
+                            ui.label(f'User: {username}').classes('text-lg font-black mb-1')
+                            ui.label(f'ID: {user_id}').classes('text-xs text-gray-400 mb-4')
                             
-                            ui.label('Основной тариф').classes('text-xs text-gray-400 uppercase font-bold')
-                            plan_select = ui.select(['FREE', 'START', 'PRO', 'WHALE'], value=current_plan).classes('w-full mb-4')
-                            
-                            ui.separator().classes('mb-4')
-                            
-                            ui.label('Индивидуальные настройки (Override)').classes('text-xs text-green-600 uppercase font-bold')
-                            ui.label('Если заполнено, эти цифры важнее тарифа').classes('text-xs text-gray-400 mb-2')
+                            # === БЛОК ПРАВ ДОСТУПА ===
+                            ui.label('Права и Доступ').classes('text-xs text-blue-600 uppercase font-bold')
+                            with ui.column().classes('w-full gap-2 mb-4 bg-blue-50 p-2 rounded'):
+                                role_select = ui.select(['user', 'moderator', 'admin'], value=current_role, label='Роль').classes('w-full')
+                                is_verified_chk = ui.checkbox('Email Verified (Подтвержден)', value=current_verified)
+                                is_active_chk = ui.checkbox('Active Account (Не забанен)', value=current_active)
+
+                            ui.separator().classes('mb-2')
+
+                            # === БЛОК ТАРИФА ===
+                            ui.label('Тариф и Лимиты').classes('text-xs text-gray-400 uppercase font-bold')
+                            plan_select = ui.select(['FREE', 'START', 'PRO', 'WHALE'], value=current_plan, label='План').classes('w-full mb-2')
                             
                             ov_spread = ui.number('Личный Спред (%)', value=custom_spread).classes('w-full')
                             ov_speed = ui.number('Личная Скорость (сек)', value=custom_speed).classes('w-full')
@@ -88,26 +93,34 @@ def create_admin_routes():
                             def save_user_settings():
                                 db = next(get_db())
                                 overrides = {}
-                                if ov_spread.value is not None: 
-                                    overrides['max_spread'] = int(ov_spread.value)
-                                if ov_speed.value is not None: 
-                                    overrides['refresh_rate'] = int(ov_speed.value)
-                                
+                                if ov_spread.value is not None: overrides['max_spread'] = int(ov_spread.value)
+                                if ov_speed.value is not None: overrides['refresh_rate'] = int(ov_speed.value)
                                 final_overrides = overrides if overrides else None
-                                update_user_subscription_settings(db, user_id, plan_select.value, final_overrides)
+                                
+                                # Вызываем новую функцию апдейта
+                                update_user_admin_settings(
+                                    db, 
+                                    user_id, 
+                                    plan_select.value,      # Тариф
+                                    role_select.value,      # Роль
+                                    is_verified_chk.value,  # Верификация
+                                    is_active_chk.value,    # Бан/Разбан
+                                    final_overrides
+                                )
                                 db.close()
-                                ui.notify(f'Настройки {username} сохранены!', type='positive')
+                                ui.notify(f'Профиль {username} сохранен!', type='positive')
                                 user_edit_dialog.close()
                                 refresh_users_table()
 
-                            ui.button('СОХРАНИТЬ', on_click=save_user_settings).classes('w-full bg-black text-white mt-4')
+                            ui.button('СОХРАНИТЬ ИЗМЕНЕНИЯ', on_click=save_user_settings).classes('w-full bg-black text-white mt-2')
                         
                         user_edit_dialog.open()
 
                     cols = [
                         {'name': 'username', 'label': 'LOGIN', 'field': 'username', 'align': 'left'},
+                        {'name': 'role', 'label': 'ROLE', 'field': 'role', 'align': 'center'}, # Новая колонка
                         {'name': 'plan', 'label': 'PLAN', 'field': 'plan', 'align': 'center'}, 
-                        {'name': 'status', 'label': 'STATUS', 'field': 'status', 'align': 'left'},
+                        {'name': 'verified', 'label': 'VERIFIED', 'field': 'verified', 'align': 'center'}, # Новая колонка
                         {'name': 'actions', 'label': 'EDIT', 'field': 'actions', 'align': 'center'},
                     ]
                     
@@ -119,24 +132,40 @@ def create_admin_routes():
                         for u in get_all_users(db):
                             sub = get_user_active_sub(db, u.id)
                             p_name = sub.plan_name if sub else 'FREE'
-                            status_text = "Standard"
-                            if sub and sub.custom_overrides:
-                                status_text = "⚡ CUSTOM"
                             
                             rows.append({
                                 'username': u.username,
+                                'role': u.role.upper(),
                                 'plan': p_name,
-                                'status': status_text,
+                                'verified': u.is_verified,
                                 'user_id': str(u.id) 
                             })
                         db.close()
                         users_table.rows = rows
                         
+                        # Слот для Роли
+                        users_table.add_slot('body-cell-role', '''
+                            <q-td :props="props">
+                                <q-badge :color="props.value == 'ADMIN' ? 'red' : (props.value == 'MODERATOR' ? 'orange' : 'blue-grey')">
+                                    {{ props.value }}
+                                </q-badge>
+                            </q-td>
+                        ''')
+
+                        # Слот для Плана
                         users_table.add_slot('body-cell-plan', '''
                             <q-td :props="props">
                                 <q-badge :color="props.value == 'WHALE' ? 'purple' : (props.value == 'PRO' ? 'green' : 'grey')">
                                     {{ props.value }}
                                 </q-badge>
+                            </q-td>
+                        ''')
+
+                        # Слот для Верификации
+                        users_table.add_slot('body-cell-verified', '''
+                            <q-td :props="props">
+                                <q-icon :name="props.value ? 'check_circle' : 'cancel'" 
+                                        :color="props.value ? 'green' : 'red'" size="sm" />
                             </q-td>
                         ''')
                         
@@ -153,6 +182,7 @@ def create_admin_routes():
 
                 # --- TAB 2: PLANS ---
                 with ui.tab_panel(t_plans):
+                    # (Оставляем без изменений)
                     with ui.row().classes('w-full justify-between items-center mb-6'):
                         ui.label('Конструктор Тарифов').classes('text-xl font-bold')
                         with ui.dialog() as create_diag, ui.card():

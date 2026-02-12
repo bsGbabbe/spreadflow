@@ -4,8 +4,7 @@ from config import DEFAULT_EXCHANGES
 
 # Настройки по умолчанию
 DEFAULT_INVESTMENT = 1000  
-# Диапазон спреда: от 0.5% до 20%
-DEFAULT_SPREAD_RANGE = {'min': 0.1, 'max': 999.0}
+DEFAULT_SPREAD_RANGE = {'min': 0.5, 'max': 20.0}
 
 @dataclass
 class UserState:
@@ -14,13 +13,14 @@ class UserState:
     """
     investment: float = DEFAULT_INVESTMENT
     
-    # === ИЗМЕНЕНИЕ: Теперь храним MIN и MAX ===
     spread_range: Dict[str, float] = field(default_factory=lambda: DEFAULT_SPREAD_RANGE.copy())
     
-    # Биржи берем из конфига
+    # === НОВОЕ: Фильтр по Market Cap ===
+    filter_mcap_enabled: bool = False
+    min_mcap: int = 100000000 # По дефолту 100М, если включено
+    
     selected_exchanges: List[str] = field(default_factory=lambda: DEFAULT_EXCHANGES.copy())
     
-    # Список монет
     selected_coins: List[str] = field(default_factory=list) 
     
     is_running: bool = True
