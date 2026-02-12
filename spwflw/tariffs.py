@@ -1,105 +1,63 @@
-from crud import get_db, get_user_by_username, get_user_active_sub, get_plan_by_name
+from crud import get_plan_rules, get_db, get_user_by_username, get_user_active_sub
 from config import DEFAULT_COINS, DEFAULT_EXCHANGES
 
-# Настройки по умолчанию, если в базе данных ничего не найдено
-DEFAULT_CONFIG = {
-    "max_spread": 1,
-    "coins_limit": 2,      # Лимит количества монет
-    "exchanges_limit": 3,  # Лимит количества бирж
-    "refresh_rate": 30,
-    "blur_hidden": True,
-    "allow_click_links": False
-}
+# Статичные списки (пока оставляем так)
+COINS_BASIC = ['BTC/USDT', 'ETH/USDT']
+COINS_STANDARD = DEFAULT_COINS[:20] 
+COINS_ALL = DEFAULT_COINS 
+EXCHANGES_ALL = DEFAULT_EXCHANGES
 
 def get_user_limits(plan_name_arg=None):
     """
-    Динамическая система лимитов:
-    1. Проверяет роль (Админ получает всё).
-    2. Загружает конфиг активного тарифа из БД.
-    3. Применяет индивидуальные оверрайды пользователя.
+    Умная функция: 
+    1. Ищет юзера в сессии.
+    2. Достает его подписку.
+    3. Если есть 'custom_overrides' — применяет их поверх тарифа.
     """
     from nicegui import app
     
     db = next(get_db())
-    
-    # Стартуем с базовых ограничений
-    final_limits = DEFAULT_CONFIG.copy()
+    limits = {
+        "max_spread": 1, "refresh_rate": 30, "blur_hidden": True, 
+        "coins": COINS_BASIC, "exchanges": DEFAULT_EXCHANGES[:3],
+        "allow_click_links": False
+    }
 
     try:
         username = app.storage.user.get('username')
-        if not username: 
-            return _apply_dynamic_lists(final_limits)
+        plan_name = "FREE"
+        overrides = {}
 
-        user = get_user_by_username(db, username)
-        if not user: 
-            return _apply_dynamic_lists(final_limits)
+        if username:
+            user = get_user_by_username(db, username)
+            if user:
+                sub = get_user_active_sub(db, user.id)
+                if sub:
+                    plan_name = sub.plan_name
+                    if sub.custom_overrides:
+                        overrides = sub.custom_overrides
 
-        # === 1. ПРОВЕРКА НА АДМИНА (ПОЛНЫЙ ДОСТУП) ===
-        if user.role == 'admin':
-            return {
-                "max_spread": 9999,
-                "coins": DEFAULT_COINS,
-                "exchanges": DEFAULT_EXCHANGES,
-                "refresh_rate": 1,
-                "blur_hidden": False,
-                "allow_click_links": True,
-                "coins_limit": len(DEFAULT_COINS),
-                "exchanges_limit": len(DEFAULT_EXCHANGES)
-            }
-
-        # === 2. ЗАГРУЗКА КОНФИГА ТАРИФА ИЗ БАЗЫ ДАННЫХ ===
-        sub = get_user_active_sub(db, user.id)
-        plan_config = {}
+        # 1. Берем базовые правила тарифа
+        base_rules = get_plan_rules(db, plan_name)
+        limits.update(base_rules)
         
-        if sub:
-            # Ищем план по имени, указанному в подписке
-            plan = get_plan_by_name(db, sub.plan_name)
-            if plan and plan.config:
-                plan_config = plan.config.copy()
-        else:
-            # Если подписки нет, пытаемся найти план FREE
-            free_plan = get_plan_by_name(db, "FREE")
-            if free_plan and free_plan.config:
-                plan_config = free_plan.config.copy()
+        # 2. Настраиваем списки монет (Hardcode логика для списков)
+        if plan_name == 'FREE': limits['coins'] = COINS_BASIC
+        elif plan_name == 'START': limits['coins'] = COINS_STANDARD
+        else: limits['coins'] = COINS_ALL
+        limits['exchanges'] = EXCHANGES_ALL
 
-        # Если нашли конфиг в плане — обновляем лимиты
-        if plan_config:
-            final_limits.update(plan_config)
+        # 3. ПРИМЕНЯЕМ ОВЕРРАЙДЫ (Самое важное!)
+        # Если админ задал личный лимит — он перезаписывает тариф
+        if overrides:
+            if 'max_spread' in overrides: limits['max_spread'] = int(overrides['max_spread'])
+            if 'refresh_rate' in overrides: limits['refresh_rate'] = int(overrides['refresh_rate'])
+            if 'allow_click_links' in overrides: limits['allow_click_links'] = bool(overrides['allow_click_links'])
 
-        # === 3. ПРИМЕНЕНИЕ ИНДИВИДУАЛЬНЫХ ОВЕРРАЙДОВ ===
-        if sub and sub.custom_overrides:
-            overrides = sub.custom_overrides
-            for key, value in overrides.items():
-                if value is not None and value != "":
-                    try:
-                        # Приведение типов для числовых и логических значений
-                        if key in ['max_spread', 'coins_limit', 'exchanges_limit', 'refresh_rate']:
-                            final_limits[key] = int(float(value))
-                        elif key in ['blur_hidden', 'allow_click_links']:
-                            final_limits[key] = bool(value)
-                        else:
-                            final_limits[key] = value
-                    except (ValueError, TypeError):
-                        continue
-
-        return _apply_dynamic_lists(final_limits)
+        return limits
 
     except Exception as e:
-        print(f"Tariff Logic Error: {e}")
-        return _apply_dynamic_lists(final_limits)
+        print(f"Tariff Error: {e}")
+        return limits
     finally:
         db.close()
-
-def _apply_dynamic_lists(config):
-    """
-    Вспомогательная функция для нарезки списков монет и бирж 
-    на основе числовых лимитов из конфига.
-    """
-    c_limit = config.get('coins_limit', 2)
-    e_limit = config.get('exchanges_limit', 3)
-    
-    # Нарезаем глобальные списки из config.py согласно лимитам тарифа
-    config['coins'] = DEFAULT_COINS[:c_limit]
-    config['exchanges'] = DEFAULT_EXCHANGES[:e_limit]
-    
-    return config

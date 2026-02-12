@@ -1,38 +1,32 @@
-from database import engine
+from db_session import SessionLocal
 from sqlalchemy import text
-from logger import log
 
-def add_column_if_not_exists(table, column, col_type):
+def fix_database():
+    print("--- ОБНОВЛЕНИЕ БАЗЫ ДАННЫХ ---")
+    db = SessionLocal()
+    
+    # 1. Добавляем custom_overrides в subscriptions
     try:
-        with engine.connect() as conn:
-            # Пытаемся выбрать колонку, если упадет - значит её нет
-            conn.execute(text(f"SELECT {column} FROM {table} LIMIT 1"))
-    except Exception:
-        log.info(f"Adding column '{column}' to table '{table}'...")
-        with engine.connect() as conn:
-            # Для SQLite/Postgres синтаксис может чуть отличаться, но базовый ALTER TABLE работает везде
-            # Если поле JSON/TEXT, дефолт нужен аккуратный
-            default = "''" if "TEXT" in col_type or "VARCHAR" in col_type else "{}"
-            if "FLOAT" in col_type or "INTEGER" in col_type:
-                default = "0"
-            
-            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type} DEFAULT {default}"))
-            conn.commit()
-        log.info(f"Column '{column}' added successfully.")
+        print("1. Добавляем custom_overrides в subscriptions...")
+        db.execute(text("ALTER TABLE subscriptions ADD COLUMN custom_overrides JSON;"))
+        db.commit()
+        print("✅ Успешно!")
+    except Exception as e:
+        db.rollback()
+        print(f"⚠️ Пропущено (возможно, уже есть): {e}")
 
-def update_database_schema():
-    log.info("Checking database schema updates...")
-    
-    # Добавляем новые поля в таблицу plans
-    add_column_if_not_exists("plans", "description", "TEXT")
-    add_column_if_not_exists("plans", "config", "JSON")
-    add_column_if_not_exists("plans", "price", "FLOAT")
-    add_column_if_not_exists("plans", "duration_days", "INTEGER")
-    
-    # Добавляем поле overrides в подписки
-    add_column_if_not_exists("subscriptions", "custom_overrides", "JSON")
-    
-    log.info("Database schema is up to date.")
+    # 2. Добавляем is_public в plans (мы это тоже добавляли в models.py)
+    try:
+        print("2. Добавляем is_public в plans...")
+        db.execute(text("ALTER TABLE plans ADD COLUMN is_public BOOLEAN DEFAULT TRUE;"))
+        db.commit()
+        print("✅ Успешно!")
+    except Exception as e:
+        db.rollback()
+        print(f"⚠️ Пропущено (возможно, уже есть): {e}")
+        
+    db.close()
+    print("--- ГОТОВО ---")
 
 if __name__ == "__main__":
-    update_database_schema()
+    fix_database()

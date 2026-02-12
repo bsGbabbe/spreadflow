@@ -1,38 +1,12 @@
 from nicegui import ui, app
-from fastapi.responses import RedirectResponse
 from crud import authenticate_user, create_activity_log, get_db, register_user_with_invite, verify_user_code
 import time
-
-# === ВОТ ЭТОГО НЕ ХВАТАЛО ===
-class CurrentUser:
-    """Обертка для пользователя"""
-    def __init__(self, user_dict):
-        self.id = user_dict.get('id')
-        self.username = user_dict.get('username', 'Guest')
-        self.role = user_dict.get('role', 'user')
-        self.email = user_dict.get('email', '')
-
-def get_current_user():
-    """Получает пользователя из сессии"""
-    user_data = app.storage.user.get('user_info')
-    if user_data:
-        return CurrentUser(user_data)
-    return None
-
-def logout():
-    """Выход"""
-    app.storage.user.clear()
-    ui.navigate.to('/login')
-# ============================
 
 def create_auth_routes():
     
     # --- ЛОГИН ---
     @ui.page('/login')
     def login_page():
-        if app.storage.user.get('user_info'):
-            return RedirectResponse('/')
-
         ui.add_head_html('<style>body { background-color: #f3f4f6; font-family: sans-serif; }</style>')
         with ui.card().classes('absolute-center w-96 p-8 shadow-2xl rounded-xl border border-gray-200'):
             ui.label('SPREADFLOW AI').classes('text-xl font-black text-center text-green-600 w-full mb-8 tracking-widest')
@@ -46,16 +20,15 @@ def create_auth_routes():
                     user = authenticate_user(db, username.value, password.value)
                     
                     if user == "unverified":
-                        ui.notify('Email not verified! Please register again to get code.', color='orange')
+                        ui.notify('Email not verified!', color='orange')
+                        # Можно перекинуть на страницу верификации, если она есть, или попросить связаться с админом
                         return
 
                     if user:
-                        app.storage.user['user_info'] = {
-                            'id': str(user.id),
-                            'username': user.username,
-                            'role': user.role,
-                            'email': user.email
-                        }
+                        app.storage.user['username'] = user.username
+                        app.storage.user['role'] = user.role
+                        app.storage.user['user_info'] = {'role': user.role, 'username': user.username, 'id': str(user.id)} # Совместимость
+                        app.storage.user['user_id'] = str(user.id)
                         create_activity_log(db, user.id, "LOGIN")
                         ui.navigate.to('/')
                     else:
@@ -66,13 +39,14 @@ def create_auth_routes():
 
             ui.button('LOG IN', on_click=try_login).classes('w-full bg-black text-white font-bold mb-4 shadow-none')
             with ui.row().classes('w-full justify-center'):
-                ui.link('Create Account', '/register').classes('text-xs text-green-600 font-bold no-underline')
+                ui.link('Activate Invite', '/register').classes('text-xs text-green-600 font-bold no-underline')
 
-    # --- РЕГИСТРАЦИЯ (С КОДОМ) ---
+    # --- РЕГИСТРАЦИЯ + ВЕРИФИКАЦИЯ ---
     @ui.page('/register')
     def register_page():
         ui.add_head_html('<style>body { background-color: #f3f4f6; font-family: sans-serif; }</style>')
         
+        # Используем stepper (шаги)
         with ui.card().classes('absolute-center w-96 p-8 shadow-2xl rounded-xl border border-gray-200'):
             ui.label('REGISTRATION').classes('text-xl font-black text-center text-gray-900 w-full mb-6')
             
@@ -96,16 +70,16 @@ def create_auth_routes():
                             
                             if ok:
                                 ui.notify(f'Code sent to {new_email.value}', type='positive')
-                                stepper.next() # АВТОМАТИЧЕСКИ ПЕРЕХОДИМ К ВВОДУ КОДА
+                                stepper.next() # Переход к шагу 2
                             else:
                                 ui.notify(msg, type='negative')
 
-                        ui.button('NEXT', on_click=do_reg).classes('bg-black text-white w-full')
+                        ui.button('NEXT', on_click=do_reg).classes('bg-black text-white')
 
-                # ШАГ 2: ВВОД КОДА
+                # ШАГ 2: ВЕРИФИКАЦИЯ
                 with ui.step('Verify Email'):
-                    ui.label('Check your email for 6-digit code').classes('text-xs text-gray-500 mb-2')
-                    code_input = ui.input('Enter Code').props('outlined dense mask="######"').classes('w-full text-center text-lg tracking-widest mb-4')
+                    ui.label('Check your email for code').classes('text-xs text-gray-500 mb-2')
+                    code_input = ui.input('Enter 6-digit Code').props('outlined dense mask="######"').classes('w-full text-center text-lg tracking-widest')
                     
                     with ui.stepper_navigation():
                         def do_verify():
