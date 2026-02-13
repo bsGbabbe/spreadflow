@@ -90,3 +90,20 @@ class Plan(Base):
     allow_telegram = Column(Boolean, default=False)
     allow_click_links = Column(Boolean, default=False)
     is_public = Column(Boolean, default=True)
+
+
+class Payment(Base):
+    __tablename__ = 'payments'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id'))
+    
+    invoice_id = Column(String, unique=True)  # ID счета в системе CryptoCloud
+    amount_usd = Column(Float)
+    currency = Column(String)  # USDT, BTC etc
+    status = Column(String, default="pending")  # pending, paid, failed
+    plan_name = Column(String)  # Какую подписку покупал
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User", back_populates="payments")

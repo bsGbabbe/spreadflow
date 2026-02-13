@@ -1,9 +1,14 @@
 import bcrypt
-from datetime import datetime
+import smtplib
+import random
+from email.mime.text import MIMEText
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, cast, String
 from models import User, Subscription, ActivityLog, Invite, Plan
 from db_session import SessionLocal
+from config import SMTP_CONFIG
+from logger import log
 
 # --- СЕССИЯ ---
 def get_db():
@@ -14,63 +19,157 @@ def get_db():
     finally:
         db.close()
 
+# --- ОТПРАВКА ПОЧТЫ (ВОССТАНОВЛЕНО) ---
+def send_verification_email(to_email, code):
+    """
+    Отправляет код верификации через SMTP.
+    Использует системное логирование для отладки.
+    """
+    try:
+        msg = MIMEText(f"Ваш код верификации для SpreadFlow AI: {code}")
+        msg['Subject'] = "SpreadFlow Verification Code"
+        msg['From'] = SMTP_CONFIG['from_email']
+        msg['To'] = to_email
+
+        log.info(f"Попытка отправки письма на {to_email}...")
+
+        # Таймаут 10 сек, чтобы интерфейс не зависал
+        with smtplib.SMTP(SMTP_CONFIG['server'], SMTP_CONFIG['port'], timeout=10) as server:
+            server.starttls()
+            server.login(SMTP_CONFIG['user'], SMTP_CONFIG['password'])
+            server.sendmail(SMTP_CONFIG['from_email'], [to_email], msg.as_string())
+        
+        log.info(f"✅ Письмо успешно отправлено на {to_email}")
+        return True
+    except Exception as e:
+        log.error(f"❌ Ошибка SMTP: {str(e)}")
+        return False
+
 # --- ПОЛЬЗОВАТЕЛИ (AUTH & READ) ---
 
 def get_user_by_username(db: Session, username: str):
     """Находит пользователя по логину"""
     return db.query(User).filter(User.username == username).first()
 
+def get_user_by_email(db: Session, email: str):
+    """Находит пользователя по почте"""
+    return db.query(User).filter(User.email == email).first()
+
+def get_user_email(db: Session, username: str):
+    """Возвращает скрытый email пользователя для отображения в UI"""
+    user = get_user_by_username(db, username)
+    if user:
+        return user.email
+    return None
+
 def authenticate_user(db: Session, username: str, password: str):
     """
-    Проверяет логин и пароль.
-    Возвращает объект User или None.
+    Проверяет логин, пароль и статус верификации.
     """
     user = get_user_by_username(db, username)
     if not user:
         return None
     
-    # Проверяем пароль через bcrypt
     if bcrypt.checkpw(password.encode('utf-8'), user.password_hash.encode('utf-8')):
+        # Проверка верификации
+        if hasattr(user, 'is_verified') and not user.is_verified:
+            return "unverified"
         return user
     return None
+
+def update_user_password(db: Session, username: str, new_password: str):
+    """
+    Обновляет пароль пользователя (хеширует и сохраняет).
+    """
+    user = get_user_by_username(db, username)
+    if not user:
+        return False, "Пользователь не найден"
+    
+    try:
+        salt = bcrypt.gensalt()
+        hashed_pw = bcrypt.hashpw(new_password.encode('utf-8'), salt).decode('utf-8')
+        user.password_hash = hashed_pw
+        db.commit()
+        return True, "Пароль успешно изменен"
+    except Exception as e:
+        db.rollback()
+        log.error(f"Error updating password: {e}")
+        return False, f"Ошибка при смене пароля: {str(e)}"
 
 def get_all_users(db: Session):
     """Возвращает список всех пользователей (сначала новые)"""
     return db.query(User).order_by(User.created_at.desc()).all()
 
 def search_users_db(db: Session, query_str: str):
-    """
-    Ищет пользователей по частичному совпадению
-    в username, email или ID.
-    """
+    """Поиск пользователей по базе"""
     if not query_str:
         return get_all_users(db)
-    
     search = f"%{query_str}%"
-    
     return db.query(User).filter(
-        or_(
-            User.username.ilike(search),
-            User.email.ilike(search),
-            cast(User.id, String).ilike(search)
-        )
+        or_(User.username.ilike(search), User.email.ilike(search), cast(User.id, String).ilike(search))
     ).order_by(User.created_at.desc()).all()
 
 # --- РЕГИСТРАЦИЯ И ИНВАЙТЫ ---
 
+def delete_invite_db(db: Session, invite_id: str):
+    """Удаление инвайта по ID"""
+    try:
+        # Ищем по ID (так надежнее чем по коду)
+        db.query(Invite).filter(Invite.id == invite_id).delete()
+        db.commit()
+        return True
+    except Exception as e:
+        db.rollback()
+        return False
+
 def check_invite(db: Session, code: str):
-    """Проверяет, существует ли код и активен ли он"""
+    """Проверяет инвайт на существование и лимиты"""
     invite = db.query(Invite).filter(Invite.code == code).first()
     if invite and invite.is_active and invite.used_count < invite.usage_limit:
         return invite
     return None
 
-def verify_user_code(db: Session, code: str):
+def verify_user_code(db: Session, username: str, code: str):
     """
-    FIX: Алиас для совместимости со старым auth.py.
-    Делает то же самое, что и check_invite.
+    Проверяет код из письма и активирует аккаунт.
     """
-    return check_invite(db, code)
+    user = get_user_by_username(db, username)
+    if user and user.verification_code == code:
+        user.is_verified = True
+        user.verification_code = None
+        db.commit()
+        return True, "Успешно"
+    return False, "Неверный код"
+
+def resend_verification_code(db: Session, username: str, new_email: str = None):
+    """
+    Генерирует новый код и отправляет его.
+    Позволяет сменить email, если пользователь ошибся при регистрации.
+    """
+    user = get_user_by_username(db, username)
+    if not user:
+        return False, "Пользователь не найден"
+    
+    if user.is_verified:
+        return False, "Аккаунт уже подтвержден"
+    
+    # Если передан новый email - обновляем его
+    if new_email and new_email != user.email:
+        # Проверяем, не занят ли он
+        if get_user_by_email(db, new_email):
+            return False, "Этот email уже занят другим пользователем"
+        user.email = new_email
+    
+    # Генерация нового кода
+    new_code = str(random.randint(100000, 999999))
+    user.verification_code = new_code
+    db.commit()
+    
+    # Отправка
+    if send_verification_email(user.email, new_code):
+        return True, f"Код отправлен на {user.email}"
+    else:
+        return False, "Ошибка отправки письма (проверьте логи)"
 
 def get_all_invites(db: Session):
     """Список всех инвайтов"""
@@ -88,17 +187,24 @@ def create_invite_db(db: Session, code: str, plan: str, limit: int):
         return False, str(e)
 
 def register_user_with_invite(db: Session, username, password, email, invite_code):
-    """Регистрация: Создаем Юзера + Подписку по коду инвайта"""
-    
-    # 1. Проверяем инвайт
+    """
+    Регистрация: Проверка -> Создание (is_verified=False) -> Отправка Email.
+    """
+    # 1. Проверки
     invite = check_invite(db, invite_code)
-    if not invite:
+    if not invite: 
         return False, "Неверный или неактивный инвайт-код"
+    
+    if get_user_by_username(db, username): 
+        return False, "Этот логин уже занят"
+    
+    if get_user_by_email(db, email): 
+        return False, "Эта почта уже зарегистрирована"
 
-    # 2. Хешируем пароль
-    pwd_bytes = password.encode('utf-8')
+    # 2. Подготовка
     salt = bcrypt.gensalt()
-    hashed_pw = bcrypt.hashpw(pwd_bytes, salt).decode('utf-8')
+    hashed_pw = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+    v_code = str(random.randint(100000, 999999))
 
     try:
         # 3. Создаем пользователя
@@ -107,12 +213,19 @@ def register_user_with_invite(db: Session, username, password, email, invite_cod
             email=email,
             password_hash=hashed_pw,
             role='user',
-            is_active=True
+            is_active=True,
+            is_verified=False,
+            verification_code=v_code
         )
         db.add(new_user)
-        db.flush() # Получаем ID до коммита
+        db.flush()
 
-        # 4. Выдаем подписку согласно инвайту
+        # 4. Отправка письма
+        if not send_verification_email(email, v_code):
+            db.rollback()
+            return False, "Ошибка отправки письма. Проверьте настройки SMTP."
+
+        # 5. Выдача подписки
         new_sub = Subscription(
             user_id=new_user.id,
             plan_name=invite.plan_name,
@@ -121,40 +234,38 @@ def register_user_with_invite(db: Session, username, password, email, invite_cod
         )
         db.add(new_sub)
 
-        # 5. Обновляем счетчик инвайта
         invite.used_count += 1
-        
         db.commit()
-        return True, "Аккаунт успешно создан!"
+        log.info(f"Пользователь {username} зарегистрирован, код отправлен.")
+        return True, "Код отправлен на почту!"
         
     except Exception as e:
         db.rollback()
-        return False, f"Ошибка базы данных (возможно логин занят): {e}"
+        log.error(f"Ошибка регистрации: {e}")
+        return False, f"Ошибка базы данных: {e}"
 
 # --- ПОДПИСКИ И ТАРИФЫ (USER SIDE) ---
 
 def get_user_active_sub(db: Session, user_id):
-    """Возвращает объект активной подписки (со всеми деталями)"""
+    """Возвращает активную подписку"""
     return db.query(Subscription).filter(
         Subscription.user_id == user_id,
         Subscription.is_active == True
     ).first()
 
 def get_user_plan(db: Session, user_id):
-    """Возвращает ТОЛЬКО название плана (строку)"""
+    """Возвращает название плана"""
     sub = get_user_active_sub(db, user_id)
     return sub.plan_name if sub else "FREE"
 
 def upgrade_user_plan(db: Session, user_id: str, new_plan: str):
-    """Смена тарифа (стандартная покупка)"""
+    """Смена тарифа"""
     try:
-        # Отключаем старую
         db.query(Subscription).filter(
             Subscription.user_id == user_id, 
             Subscription.is_active == True
         ).update({"is_active": False, "end_date": datetime.utcnow()})
         
-        # Создаем новую
         new_sub = Subscription(
             user_id=user_id,
             plan_name=new_plan,
@@ -175,14 +286,13 @@ def get_all_plans(db: Session):
     return db.query(Plan).all()
 
 def get_plan_by_name(db: Session, name: str):
-    """Получить объект тарифа (FIX: добавлен для совместимости)"""
+    """Получить объект тарифа по имени"""
     return db.query(Plan).get(name)
 
 def get_plan_rules(db: Session, plan_name: str):
     """Получает настройки тарифа из БД"""
     plan = db.query(Plan).get(plan_name)
     if not plan:
-        # Дефолтные настройки, если план не найден
         return {"max_spread": 1, "refresh_rate": 30, "blur_hidden": True, "allow_click_links": False}
     
     return {
@@ -190,7 +300,6 @@ def get_plan_rules(db: Session, plan_name: str):
         "refresh_rate": plan.refresh_rate,
         "blur_hidden": plan.blur_hidden,
         "allow_click_links": plan.allow_click_links,
-        # FIX: Учитываем поле allow_telegram, если оно есть в модели (безопасное чтение)
         "allow_telegram": getattr(plan, 'allow_telegram', False) 
     }
 
@@ -218,36 +327,26 @@ def update_plan_details(db: Session, name: str,
                         spread: int, speed: int, 
                         blur: bool, telegram: bool, click: bool,
                         features: list):
-    """
-    GOD MODE: Обновление АБСОЛЮТНО ВСЕХ параметров тарифа.
-    """
+    """GOD MODE: Обновление всех параметров тарифа"""
     try:
         plan = db.query(Plan).get(name)
         if plan:
-            # 1. Визуальная часть
             plan.price_str = price
             plan.period_str = period
             plan.css_color = color
             plan.is_public = is_public
-            
-            # 2. Лимиты
             plan.max_spread = spread
             plan.refresh_rate = speed
-            
-            # 3. Доступы
             plan.blur_hidden = blur
             plan.allow_telegram = telegram
             plan.allow_click_links = click
-            
-            # 4. Фичи (список)
             plan.description_features = features
-            
             db.commit()
             return True
         return False
     except Exception as e:
         db.rollback()
-        print(f"Error updating plan: {e}")
+        log.error(f"Error updating plan: {e}")
         return False
 
 def delete_plan_db(db: Session, name: str):
@@ -263,21 +362,15 @@ def delete_plan_db(db: Session, name: str):
 # --- ИНДИВИДУАЛЬНЫЕ НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ---
 
 def update_user_subscription_settings(db: Session, user_id: str, plan_name: str, overrides: dict = None):
-    """
-    Админ меняет тариф юзеру ИЛИ устанавливает персональные лимиты (overrides).
-    Если тариф остается тем же, мы просто обновляем JSON overrides,
-    не сбрасывая дату начала подписки.
-    """
+    """Обновление подписки и персональных лимитов"""
     try:
         current_sub = get_user_active_sub(db, user_id)
         
-        # Сценарий 1: Тариф тот же, меняем только настройки
         if current_sub and current_sub.plan_name == plan_name:
             current_sub.custom_overrides = overrides
             db.commit()
             return True
 
-        # Сценарий 2: Смена тарифа (или создание новой подписки)
         if current_sub:
             current_sub.is_active = False
             current_sub.end_date = datetime.utcnow()
@@ -287,14 +380,14 @@ def update_user_subscription_settings(db: Session, user_id: str, plan_name: str,
             plan_name=plan_name,
             is_active=True,
             start_date=datetime.utcnow(),
-            custom_overrides=overrides # JSON поле
+            custom_overrides=overrides 
         )
         db.add(new_sub)
         db.commit()
         return True
     except Exception as e:
         db.rollback()
-        print(f"Error updating user sub: {e}")
+        log.error(f"Error updating user sub: {e}")
         return False
 
 # --- ЛОГИ И СТАТИСТИКА ---
@@ -311,10 +404,10 @@ def create_activity_log(db: Session, user_id, action, ip_address=None, details=N
         db.add(new_log)
         db.commit()
     except:
-        pass # Логи не должны ломать основную работу
+        db.rollback()
 
 def get_recent_logs(db: Session, limit=50):
-    """Получить последние логи с данными юзера"""
+    """Последние логи с данными юзера"""
     return db.query(ActivityLog).join(User).order_by(ActivityLog.timestamp.desc()).limit(limit).all()
 
 def get_dashboard_stats(db: Session):

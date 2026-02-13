@@ -7,6 +7,7 @@ import user_profile
 import admin_panel
 import auth
 import subscriptions
+import crud
 import time
 from config import DEFAULT_EXCHANGES, DEFAULT_COINS
 import market_data 
@@ -17,75 +18,24 @@ def get_trade_link(exchange, symbol):
     Генерирует максимально точную ссылку на торговую пару.
     """
     try:
-        # Разделяем BASE/QUOTE (например, BTC/USDT)
         base, quote = symbol.split('/')
         base = base.upper()
         quote = quote.upper()
         ex = exchange.lower()
         
-        # --- BINANCE ---
-        if ex == 'binance':
-            # Стандартная ссылка Binance Spot: BTC_USDT
-            return f"https://www.binance.com/en/trade/{base}_{quote}?type=spot"
-            
-        # --- BYBIT ---
-        elif ex == 'bybit':
-            # Bybit Spot: BTC/USDT
-            return f"https://www.bybit.com/trade/spot/{base}/{quote}"
-            
-        # --- OKX ---
-        elif ex == 'okx':
-            # OKX Spot: BTC-USDT
-            return f"https://www.okx.com/trade-spot/{base.lower()}-{quote.lower()}"
-            
-        # --- GATE.IO ---
-        elif ex == 'gateio':
-            # Gate: BTC_USDT
-            return f"https://www.gate.io/trade/{base}_{quote}"
-            
-        # --- KUCOIN ---
-        elif ex == 'kucoin':
-            # KuCoin: BTC-USDT
-            return f"https://www.kucoin.com/trade/{base}-{quote}"
-            
-        # --- MEXC ---
-        elif ex == 'mexc':
-            # MEXC: BTC_USDT
-            return f"https://www.mexc.com/exchange/{base}_{quote}"
-            
-        # --- HTX (Huobi) ---
-        elif ex == 'htx':
-            # HTX: btc_usdt (маленькими)
-            return f"https://www.htx.com/trade/{base.lower()}_{quote.lower()}"
-            
-        # --- BITGET ---
-        elif ex == 'bitget':
-            # Bitget: BTCUSDT (слитно)
-            return f"https://www.bitget.com/spot/{base}{quote}"
-            
-        # --- KRAKEN ---
-        elif ex == 'kraken':
-            # Kraken Pro: BTC-USDT
-            return f"https://pro.kraken.com/app/trade/{base}-{quote}"
-            
-        # --- COINBASE ---
-        elif ex == 'coinbase':
-            # Coinbase Advanced: BTC-USDT
-            return f"https://www.coinbase.com/advanced-trade/spot/{base}-{quote}"
-            
-        # --- BINGX ---
-        elif ex == 'bingx':
-            # BingX: BTC-USDT
-            return f"https://bingx.com/en-us/spot/{base}-{quote}"
-            
-        # --- POLONIEX ---
-        elif ex == 'poloniex':
-            # Poloniex: BTC_USDT
-            return f"https://poloniex.com/spot/{base}_{quote}"
-            
-        else:
-            # Универсальный поиск, если биржа неизвестна
-            return f"https://www.google.com/search?q={exchange}+spot+{base}+{quote}"
+        if ex == 'binance': return f"https://www.binance.com/en/trade/{base}_{quote}?type=spot"
+        elif ex == 'bybit': return f"https://www.bybit.com/trade/spot/{base}/{quote}"
+        elif ex == 'okx': return f"https://www.okx.com/trade-spot/{base.lower()}-{quote.lower()}"
+        elif ex == 'gateio': return f"https://www.gate.io/trade/{base}_{quote}"
+        elif ex == 'kucoin': return f"https://www.kucoin.com/trade/{base}-{quote}"
+        elif ex == 'mexc': return f"https://www.mexc.com/exchange/{base}_{quote}"
+        elif ex == 'htx': return f"https://www.htx.com/trade/{base.lower()}_{quote.lower()}"
+        elif ex == 'bitget': return f"https://www.bitget.com/spot/{base}{quote}"
+        elif ex == 'kraken': return f"https://pro.kraken.com/app/trade/{base}-{quote}"
+        elif ex == 'coinbase': return f"https://www.coinbase.com/advanced-trade/spot/{base}-{quote}"
+        elif ex == 'bingx': return f"https://bingx.com/en-us/spot/{base}-{quote}"
+        elif ex == 'poloniex': return f"https://poloniex.com/spot/{base}_{quote}"
+        else: return f"https://www.google.com/search?q={exchange}+spot+{base}+{quote}"
     except:
         return "#"
 
@@ -96,12 +46,56 @@ def init_ui():
         user = auth.get_current_user()
         if not user: return RedirectResponse('/login')
 
+        # --- ЗАГРУЗКА ЛИМИТОВ (ТАРИФ + ПЕРСОНАЛЬНЫЕ) ---
+        # По умолчанию ставим жесткие ограничения, пока не загрузим реальные
+        user_limits = {
+            'max_pairs': 0, 
+            'blocked_coins': [],
+            'max_spread': 0.0  # <--- Добавили лимит спреда
+        }
+        
+        try:
+            db_gen = crud.get_db()
+            db = next(db_gen)
+            
+            # 1. Получаем подписку и название плана
+            active_sub = crud.get_user_active_sub(db, user.id)
+            plan_name = active_sub.plan_name if active_sub else "FREE"
+            
+            # 2. Получаем БАЗОВЫЕ правила тарифа
+            plan_rules = crud.get_plan_rules(db, plan_name)
+            user_limits['max_spread'] = float(plan_rules.get('max_spread', 0))
+            
+            # 3. Применяем ПЕРСОНАЛЬНЫЕ исключения (Overrides), если есть
+            if active_sub and active_sub.custom_overrides:
+                ov = active_sub.custom_overrides
+                
+                # Лимит пар
+                if ov.get('max_pairs'): user_limits['max_pairs'] = int(ov.get('max_pairs'))
+                
+                # Блокировка монет
+                if ov.get('blocked_coins'): 
+                    user_limits['blocked_coins'] = [x.strip().upper() for x in ov.get('blocked_coins').split(',') if x.strip()]
+                
+                # Переопределение спреда (если админ задал лично)
+                if ov.get('max_spread') is not None:
+                    user_limits['max_spread'] = float(ov.get('max_spread'))
+
+        except Exception as e:
+            print(f"Error loading limits: {e}")
+        # -----------------------------------------------------
+
         state = UserState()
+        if not hasattr(state, 'mcap_range'):
+            state.mcap_range = {'min': 0, 'max': 100_000_000_000}
+
         last_render_ts = 0
         calc_state = {'amount': 1000.0, 'spread': 1.5, 'fee_buy': 0.1, 'fee_sell': 0.1, 'cycles': 1}
-        
-        # Состояние поиска для вкладки Market
         market_search = {'text': ''}
+
+        # === ЗАГРУЗКА ИЗБРАННОГО ===
+        fav_coins = app.storage.user.get('fav_coins', [])
+        fav_exs = app.storage.user.get('fav_exs', [])
 
         # === СТИЛИ ===
         ui.add_head_html('''
@@ -137,7 +131,7 @@ def init_ui():
                 ui.avatar('person', color='slate-300', text_color='white').classes('shadow-sm')
                 with ui.column().classes('gap-0'):
                     ui.label(user.username).classes('font-bold text-slate-700 text-sm')
-                    ui.label(user.role).classes('text-xs text-slate-400 uppercase font-bold')
+                    ui.label(f"{user.role} | Limit: {user_limits['max_spread']}%").classes('text-xs text-slate-400 uppercase font-bold')
 
             ui.separator().classes('bg-slate-100')
             
@@ -167,35 +161,82 @@ def init_ui():
                     # --- ФИЛЬТРЫ ---
                     with ui.expansion('⚙️ Filters & Investment', icon='tune').classes('w-full bg-white rounded-xl shadow-sm border border-slate-200 mb-4'):
                         with ui.column().classes('p-4 w-full'):
+                            
+                            # Ряд 1: Инвестиции и Спред
                             with ui.row().classes('w-full gap-6 mb-4'):
                                 with ui.column().classes('flex-1'):
                                     ui.label("Invest ($)").classes('text-xs font-bold text-slate-400')
                                     ui.number(min=0).bind_value(state, 'investment').classes('w-full')
                                 
-                                # Ползунок спреда
                                 with ui.column().classes('flex-1'):
                                     ui.label("Spread Range (%)").classes('text-xs font-bold text-slate-400')
                                     with ui.row().classes('w-full gap-2 mb-2'):
                                         ui.number('Min', min=0, max=1000).bind_value(state.spread_range, 'min').classes('flex-1').props('dense outlined suffix="%"')
                                         ui.number('Max', min=0, max=1000).bind_value(state.spread_range, 'max').classes('flex-1').props('dense outlined suffix="%"')
-                                    ui.range(min=0, max=1000.0, step=0.1).bind_value(state, 'spread_range').props('label-always snap label-color="black"').classes('w-full px-2')
+                                    # Ползунок (ограничен визуально, но реальная проверка в коде ниже)
+                                    ui.range(min=0, max=1000.0, step=0.1).bind_value(state, 'spread_range').props('snap label-color="black"').classes('w-full px-2')
 
                             ui.separator().classes('mb-4')
                             
                             # === НОВОЕ: Фильтр по Market Cap ===
-                            with ui.row().classes('w-full gap-6 items-center mb-4'):
-                                ui.switch('Filter by Market Cap').bind_value(state, 'filter_mcap_enabled').classes('text-slate-700 font-bold')
-                                # Показываем инпут только если свитч включен
-                                ui.number('Min Cap ($)', min=0).bind_value(state, 'min_mcap').bind_visibility_from(state, 'filter_mcap_enabled').classes('flex-1').props('outlined dense prefix="$"')
+                            ui.label("Market Cap Filter ($)").classes('text-xs font-bold text-slate-400 uppercase')
+                            with ui.row().classes('w-full gap-6 items-center mb-2'):
+                                ui.switch('Enable').bind_value(state, 'filter_mcap_enabled').classes('text-slate-700 font-bold')
+                                
+                                with ui.column().classes('flex-1'):
+                                    with ui.row().classes('w-full gap-2'):
+                                        ui.number('Min Cap', min=0).bind_value(state.mcap_range, 'min').props('dense outlined prefix="$"').classes('flex-1')
+                                        ui.number('Max Cap', min=0).bind_value(state.mcap_range, 'max').props('dense outlined prefix="$"').classes('flex-1')
+                                    
+                                    ui.range(min=0, max=100_000_000_000, step=100_000_000).bind_value(state, 'mcap_range').props('color=green snap').classes('w-full px-2')
 
                             ui.separator().classes('mb-4')
 
+                            # === БИРЖИ И МОНЕТЫ ===
+                            def get_sorted_options(all_items, favorites):
+                                return sorted(all_items, key=lambda x: (x not in favorites, x))
+
                             with ui.row().classes('w-full gap-6'):
                                 with ui.column().classes('flex-1'):
-                                    ui.label("Exchanges").classes('text-xs font-bold text-slate-400')
-                                    ui.select(DEFAULT_EXCHANGES, multiple=True).bind_value(state, 'selected_exchanges').props('use-chips use-input').classes('w-full')
+                                    with ui.row().classes('w-full justify-between items-end'):
+                                        ui.label("Exchanges").classes('text-xs font-bold text-slate-400')
+                                        
+                                        def pin_exchanges():
+                                            app.storage.user['fav_exs'] = state.selected_exchanges[:]
+                                            ui.notify(f'Pinned {len(state.selected_exchanges)} exchanges!')
+                                            sorted_exs = get_sorted_options(DEFAULT_EXCHANGES, state.selected_exchanges)
+                                            ex_select.options = sorted_exs
+                                            
+                                        ui.button(icon='star', on_click=pin_exchanges).props('flat dense round color=amber').tooltip('Pin selected as Favorites')
+
+                                    sorted_exs = get_sorted_options(DEFAULT_EXCHANGES, fav_exs)
+                                    ex_select = ui.select(sorted_exs, multiple=True).bind_value(state, 'selected_exchanges').props('use-chips use-input').classes('w-full')
+
                                 with ui.column().classes('flex-1'):
-                                    ui.label("Coins").classes('text-xs font-bold text-slate-400')
+                                    with ui.row().classes('w-full justify-between items-end'):
+                                        ui.label("Coins").classes('text-xs font-bold text-slate-400')
+                                        
+                                        with ui.row().classes('gap-1'):
+                                            def pin_coins():
+                                                app.storage.user['fav_coins'] = state.selected_coins[:]
+                                                ui.notify(f'Pinned {len(state.selected_coins)} coins!')
+                                                if coin_select.options:
+                                                    coin_select.options = get_sorted_options(coin_select.options, state.selected_coins)
+
+                                            ui.button(icon='star', on_click=pin_coins).props('flat dense round color=amber').tooltip('Pin selected as Favorites')
+                                            
+                                            def toggle_coins():
+                                                if not coin_select.options: return
+                                                if len(state.selected_coins) > 0:
+                                                    state.selected_coins = []
+                                                else:
+                                                    limit = 200
+                                                    state.selected_coins = coin_select.options[:limit]
+                                                    if len(coin_select.options) > limit:
+                                                        ui.notify(f'Selected top {limit} coins (safety limit)', color='orange')
+                                            
+                                            ui.button(icon='select_all', on_click=toggle_coins).props('flat dense round color=blue').tooltip('Select All / Clear')
+
                                     coin_select = ui.select([], multiple=True, label="Search coins...").bind_value(state, 'selected_coins').props('use-chips use-input').classes('w-full')
 
                     # --- КАЛЬКУЛЯТОР ---
@@ -233,11 +274,12 @@ def init_ui():
                                         ui.label('ROI %').classes('calc-label')
                                         ui.label().bind_text_from(calc_state, 'amount', lambda x: f"{get_calc_results()[3]:.2f}%").classes('calc-value')
 
-                    # --- ТАБЛИЦА (ui.table) ---
+                    # --- ТАБЛИЦА ---
                     ui.label("LIVE OPPORTUNITIES").classes('text-xl font-black text-slate-800 tracking-tight')
                     
                     columns = [
                         {'name': 'symbol', 'label': 'PAIR', 'field': 'symbol', 'align': 'left', 'sortable': True},
+                        {'name': 'mcap', 'label': 'MCAP', 'field': 'mcap', 'align': 'left', 'sortable': True},
                         {'name': 'spread', 'label': 'SPREAD', 'field': 'spread', 'align': 'left', 'sortable': True},
                         {'name': 'profit', 'label': 'PROFIT', 'field': 'profit', 'align': 'left', 'sortable': True},
                         {'name': 'buy_price', 'label': 'BUY PRICE', 'field': 'buy_price', 'align': 'left'},
@@ -255,6 +297,14 @@ def init_ui():
                                 </q-avatar>
                                 <span class="font-bold text-slate-700">{{ props.value }}</span>
                             </div>
+                        </q-td>
+                    ''')
+
+                    arb_table.add_slot('body-cell-mcap', '''
+                        <q-td :props="props">
+                            <span class="text-xs text-slate-500 font-bold bg-slate-100 px-2 py-1 rounded">
+                                {{ props.value }}
+                            </span>
                         </q-td>
                     ''')
 
@@ -287,43 +337,72 @@ def init_ui():
                     ''')
 
                     def render_arbitrage():
+                        # Обновление списка монет
                         if backend.DISCOVERED_COINS:
-                            sorted_coins = sorted(list(backend.DISCOVERED_COINS))
-                            if coin_select.options != sorted_coins:
+                            current_favs = app.storage.user.get('fav_coins', [])
+                            all_discovered = list(backend.DISCOVERED_COINS)
+                            # Сортировка: избранные вверху
+                            sorted_coins = sorted(all_discovered, key=lambda x: (x not in current_favs, x))
+                            
+                            if set(coin_select.options) != set(sorted_coins):
                                 coin_select.options = sorted_coins
                                 coins_count_label.set_text(f"Scanning {len(sorted_coins)} pairs")
 
                         if not state.is_running: return
 
-                        # === ПОДГОТОВКА ДАННЫХ ДЛЯ ФИЛЬТРАЦИИ ПО КАПЕ ===
-                        # Создаем словарь {SYMBOL: MCAP} из данных CoinGecko для быстрого поиска
+                        # === СБОРКА ДАННЫХ ===
                         mcap_lookup = {}
                         if market_data.MARKET_DATA:
                             for c in market_data.MARKET_DATA:
-                                # CoinGecko символы маленькие (btc), CCXT большие (BTC/USDT)
-                                sym = c['symbol'].upper()
-                                mcap_lookup[sym] = c.get('market_cap', 0) or 0
+                                sym = c.get('symbol', '').upper().strip()
+                                if sym:
+                                    mcap_lookup[sym] = c.get('market_cap', 0) or 0
 
                         new_rows = []
-                        min_spread = state.spread_range['min']
-                        max_spread = state.spread_range['max']
+                        
+                        # --- ПРИМЕНЯЕМ ЛИМИТЫ ТАРИФА (БЕЗОПАСНОСТЬ) ---
+                        # Пользователь может хотеть 100%, но если тариф разрешает 3%, мы режем.
+                        # Если у юзера "Unlimited" (WHALE), то user_limits['max_spread'] обычно высокое число (1000)
+                        
+                        ui_min = state.spread_range['min']
+                        ui_max = state.spread_range['max']
+                        
+                        # Реальный макс спред = МИНИМУМ между тем что хочет юзер и тем что разрешает тариф
+                        effective_max_spread = min(ui_max, user_limits['max_spread'])
+                        
+                        min_mcap_val = state.mcap_range['min']
+                        max_mcap_val = state.mcap_range['max']
 
                         for item in backend.GLOBAL_OPPORTUNITIES:
+                            # 1. Сначала отсекаем по жесткому лимиту тарифа
+                            if item['spread'] > effective_max_spread: continue
+                            
+                            # 2. Потом по нижнему порогу UI
+                            if item['spread'] < ui_min: continue
+
+                            # 3. Фильтры монет и бирж
                             if state.selected_coins and item['symbol'] not in state.selected_coins: continue
+                            
+                            base_coin = item['symbol'].split('/')[0].upper()
+                            if base_coin in user_limits['blocked_coins']: continue 
+
                             if item['buy_ex'] not in state.selected_exchanges: continue
                             if item['sell_ex'] not in state.selected_exchanges: continue
-                            if not (min_spread <= item['spread'] <= max_spread): continue
                             
-                            # === ЛОГИКА ФИЛЬТРА КАПИТАЛИЗАЦИИ ===
+                            # === ФИЛЬТР MCAP ===
+                            coin_mcap = mcap_lookup.get(base_coin, 0)
+                            
                             if state.filter_mcap_enabled:
-                                # Берем базовую монету из пары (BTC из BTC/USDT)
-                                base_coin = item['symbol'].split('/')[0]
-                                coin_mcap = mcap_lookup.get(base_coin, 0)
-                                if coin_mcap < state.min_mcap:
-                                    continue # Пропускаем, если капа маленькая
+                                if not (min_mcap_val <= coin_mcap <= max_mcap_val):
+                                    continue 
 
                             profit = (item['spread'] / 100.0) * state.investment
                             
+                            if coin_mcap >= 1e9: mcap_str = f"${coin_mcap/1e9:.2f}B"
+                            elif coin_mcap >= 1e6: mcap_str = f"${coin_mcap/1e6:.1f}M"
+                            elif coin_mcap > 0: mcap_str = f"${coin_mcap/1e3:.0f}K"
+                            else: mcap_str = "-" 
+
                             new_rows.append({
                                 'symbol': item['symbol'],
                                 'spread': item['spread'],
@@ -334,18 +413,21 @@ def init_ui():
                                 'sell_ex': item['sell_ex'],
                                 'link_buy': get_trade_link(item['buy_ex'], item['symbol']),
                                 'link_sell': get_trade_link(item['sell_ex'], item['symbol']),
-                                'route': 'link' 
+                                'route': 'link',
+                                'mcap': mcap_str
                             })
 
-                        # === ИЗМЕНЕНИЕ: Увеличили лимит до 100 монет ===
-                        arb_table.rows = new_rows[:100]
+                        # Лимит связок (персональный)
+                        if user_limits['max_pairs'] > 0:
+                            new_rows = new_rows[:user_limits['max_pairs']]
+                        
+                        arb_table.rows = new_rows[:1000]
 
                 # --- Вкладка 2: РЫНОК ---
                 with ui.tab_panel(tab_market).classes('p-0 gap-4'):
                     with ui.row().classes('w-full justify-between items-center'):
                         ui.label("MARKET OVERVIEW (Top 150)").classes('text-xl font-black text-slate-800 tracking-tight')
                         
-                        # === НОВОЕ: Поиск ===
                         with ui.row().classes('items-center gap-2'):
                             ui.input(placeholder='Search Coin...').bind_value(market_search, 'text').props('dense outlined rounded append-icon=search').classes('w-64 bg-white')
                             ui.button('Refresh', icon='refresh', on_click=lambda: render_market()).props('flat dense color=grey')
@@ -368,7 +450,6 @@ def init_ui():
                         search_text = market_search['text'].lower()
 
                         for coin in data:
-                            # === ФИЛЬТР ПОИСКА ===
                             if search_text:
                                 if search_text not in coin['name'].lower() and search_text not in coin['symbol'].lower():
                                     continue
@@ -382,7 +463,6 @@ def init_ui():
                                             ui.label(coin.get('name', 'Unknown')).classes('font-bold text-slate-700 text-sm')
                                             ui.label(coin.get('symbol', '').upper()).classes('text-xs text-slate-400 font-bold')
                                     
-                                    # === ЦВЕТ ЦЕНЫ (Зеленый/Красный) ===
                                     change = coin.get('price_change_percentage_24h', 0) or 0
                                     price_color = 'text-green-600' if change >= 0 else 'text-red-600'
                                     ui.label(f"${coin.get('current_price', 0):,}").classes(f'mono font-bold {price_color}')
@@ -404,20 +484,12 @@ def init_ui():
                 render_arbitrage()
                 last_render_ts = time.time()
             if tabs.value == 'MARKET OVERVIEW':
-                # Рендерим маркет, только если он пустой или изменился поиск (упрощенно: можно добавить проверку на last update рынка)
-                # Чтобы поиск работал "на лету", можно привязать on_change к инпуту, но тут рендер идет по таймеру
                 if not market_container.default_slot.children:
                      render_market()
 
-        # Привязываем рендер рынка к вводу текста (для мгновенного поиска)
-        # Находим элемент инпута в дереве NiceGUI сложновато отсюда, поэтому
-        # просто добавим проверку в таймер или используем on_change в самом инпуте (сделано выше через render_market() в on_click, но лучше бы реактивно)
-        # Добавим реактивность:
         def on_search_change():
             render_market()
         
-        # Находим инпут в коде выше и добавляем .on('input', on_search_change) - но это сложно в текущей структуре.
-        # Проще проверять изменение стейта:
         last_search_text = ''
         def search_watcher():
             nonlocal last_search_text
@@ -426,4 +498,4 @@ def init_ui():
                 last_search_text = market_search['text']
         
         ui.timer(0.5, ui_tick)
-        ui.timer(0.3, search_watcher) # Следим за поиском
+        ui.timer(0.3, search_watcher)

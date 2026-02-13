@@ -3,6 +3,8 @@ import asyncio
 import sys
 import os
 from dotenv import load_dotenv
+import admin_page
+
 
 # Модули проекта
 from frontend import init_ui 
@@ -44,10 +46,11 @@ app.on_startup(lambda: asyncio.create_task(market_service_task()))  # Рынок
 if __name__ in {"__main__", "__mp_main__"}:
     log.info("🚀 Starting SpreadFlow AI...")
     ui.run(
-        title="SpreadFlow AI", 
-        port=8080, 
-        reload=False,
-        show=False,
-        storage_secret=STORAGE_SECRET, 
-        favicon="🚀"
-    )
+    title="SpreadFlow AI", 
+    port=8080, 
+    reload=False,
+    show=False,
+    storage_secret=STORAGE_SECRET, 
+    favicon="🚀",
+    reconnect_timeout=10.0  # <--- Увеличил таймаут, чтобы не рвало соединение при загрузке данных
+)

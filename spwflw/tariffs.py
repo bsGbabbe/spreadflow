@@ -2,8 +2,8 @@ from crud import get_plan_rules, get_db, get_user_by_username, get_user_active_s
 from config import DEFAULT_COINS, DEFAULT_EXCHANGES
 
 # Статичные списки (базовая логика)
-COINS_BASIC = ['BTC/USDT', 'ETH/USDT']
-COINS_STANDARD = DEFAULT_COINS[:20] 
+COINS_BASIC = ['BTC/USDT', 'ETH/USDT','ADA/USDT', 'AVAX/USDT']
+COINS_STANDARD = DEFAULT_COINS[:6] 
 COINS_ALL = DEFAULT_COINS 
 EXCHANGES_ALL = DEFAULT_EXCHANGES
 
