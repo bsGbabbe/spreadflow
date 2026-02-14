@@ -67,6 +67,7 @@ def calculate_global_spreads(prices_cache):
         
         if len(ex_prices) < 2: continue 
 
+        # === ВЕРНУЛИ СТАРУЮ ЛОГИКУ (Best Bid / Best Ask) ===
         sorted_prices = sorted(ex_prices.items(), key=lambda x: x[1])
         min_ex, min_p = sorted_prices[0]
         max_ex, max_p = sorted_prices[-1]
@@ -75,8 +76,8 @@ def calculate_global_spreads(prices_cache):
 
         spread = ((max_p - min_p) / min_p) * 100
         
-        # === ИЗМЕНЕНИЕ: Убран лимит 200%. Теперь хоть 10000% ===
-        if spread < 0.1: continue
+        # Показываем спреды больше -5%, чтобы были видны хоть какие-то данные
+        if spread < -5.0: continue
 
         temp_list.append({
             "symbol": sym, 

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, JSON, Integer
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, JSON, Integer, Float
 from sqlalchemy.dialects.postgresql import UUID, INET
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -19,9 +19,11 @@ class User(Base):
     role = Column(String(20), default='user') 
     is_active = Column(Boolean, default=True) 
     
-    # === ИЗМЕНЕНИЕ: По умолчанию False, пока не введет код ===
+    # Связи
+    payments = relationship("Payment", back_populates="user")
+    tickets = relationship("SupportTicket", back_populates="user") # <--- НОВОЕ: Связь с тикетами
+    
     is_verified = Column(Boolean, default=False) 
-    # === НОВОЕ: Поле для хранения кода ===
     verification_code = Column(String(6), nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -90,3 +92,31 @@ class Plan(Base):
     allow_telegram = Column(Boolean, default=False)
     allow_click_links = Column(Boolean, default=False)
     is_public = Column(Boolean, default=True)
+
+# --- 7. ПЛАТЕЖИ ---
+class Payment(Base):
+    __tablename__ = 'payments'
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id'))
+    invoice_id = Column(String, unique=True)
+    amount_usd = Column(Float)
+    currency = Column(String)
+    status = Column(String, default="pending")
+    plan_name = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    user = relationship("User", back_populates="payments")
+
+# --- 8. ТИКЕТЫ ПОДДЕРЖКИ (НОВОЕ) ---
+class SupportTicket(Base):
+    __tablename__ = 'support_tickets'
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id'))
+    
+    subject = Column(String(255), nullable=False) # Тема
+    message = Column(Text, nullable=False)        # Сообщение
+    contact_info = Column(String(255), nullable=True) # Контакт (ТГ/Email)
+    status = Column(String(20), default='OPEN')   # OPEN, CLOSED
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User", back_populates="tickets")

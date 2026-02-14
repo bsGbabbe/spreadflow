@@ -53,7 +53,6 @@ def create_tariffs_route():
         async def buy_plan(plan_name, price_str):
             # 1. Проверка авторизации
             user_id = app.storage.user.get('user_id')
-            email = app.storage.user.get('email', 'customer@spreadflow.ai') 
             
             if not user_id:
                 ui.notify('Сначала войдите в аккаунт!', type='warning')
@@ -77,15 +76,13 @@ def create_tariffs_route():
                 ui.navigate.to('/profile')
                 return
 
-            # 3. Генерируем уникальный ID заказа
-            order_id = f"{user_id}_{plan_name}_{int(time.time())}"
-
-            # 4. Показываем спиннер
+            # 3. Показываем спиннер
             loading_notif = ui.notify('Генерируем ссылку на оплату...', type='ongoing', timeout=0)
             
             # --- ЗАПРОС К CRYPTOCLOUD (Асинхронно) ---
+            # ИСПРАВЛЕНИЕ: Передаем правильные аргументы (user_id, plan_name, amount)
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: create_crypto_invoice(amount, order_id, email))
+            result = await loop.run_in_executor(None, lambda: create_crypto_invoice(user_id, plan_name, amount))
             
             # Безопасно убираем уведомление
             if loading_notif:
@@ -106,7 +103,7 @@ def create_tariffs_route():
                     
                     ui.label('1. Нажмите кнопку для оплаты (USDT / Карта):').classes('text-sm font-bold self-start mb-2')
                     
-                    # --- ВАЖНОЕ ИСПРАВЛЕНИЕ: ui.navigate.to вместо ui.open ---
+                    # ui.navigate.to вместо ui.open для корректного открытия в новой вкладке
                     ui.button('ПЕРЕЙТИ К ОПЛАТЕ ➔', on_click=lambda: ui.navigate.to(pay_url, new_tab=True)).props('unelevated color=blue-600 size=lg').classes('w-full font-bold mb-6')
                     
                     ui.separator().classes('mb-6')

@@ -1,32 +1,63 @@
-from db_session import SessionLocal
+import time
 from sqlalchemy import text
+from db_session import engine
+from models import Base
+# Импортируем модели, чтобы SQLAlchemy знала о них при create_all
+from models import User, Plan, Subscription, Invite, ActivityLog, AdminNote
+from logger import log
 
-def fix_database():
-    print("--- ОБНОВЛЕНИЕ БАЗЫ ДАННЫХ ---")
-    db = SessionLocal()
+def fix_database_schema():
+    """
+    Обновляет структуру БД до актуального состояния models.py.
+    1. Добавляет новые колонки в users (без удаления данных).
+    2. Пересоздает таблицы тарифов и подписок (для чистоты настроек).
+    """
+    print("🛠️  НАЧИНАЕМ ОБНОВЛЕНИЕ СХЕМЫ БАЗЫ ДАННЫХ...")
     
-    # 1. Добавляем custom_overrides в subscriptions
-    try:
-        print("1. Добавляем custom_overrides в subscriptions...")
-        db.execute(text("ALTER TABLE subscriptions ADD COLUMN custom_overrides JSON;"))
-        db.commit()
-        print("✅ Успешно!")
-    except Exception as e:
-        db.rollback()
-        print(f"⚠️ Пропущено (возможно, уже есть): {e}")
-
-    # 2. Добавляем is_public в plans (мы это тоже добавляли в models.py)
-    try:
-        print("2. Добавляем is_public в plans...")
-        db.execute(text("ALTER TABLE plans ADD COLUMN is_public BOOLEAN DEFAULT TRUE;"))
-        db.commit()
-        print("✅ Успешно!")
-    except Exception as e:
-        db.rollback()
-        print(f"⚠️ Пропущено (возможно, уже есть): {e}")
+    with engine.connect() as conn:
+        # Включаем автокоммит для DDL операций
+        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
         
-    db.close()
-    print("--- ГОТОВО ---")
+        # --- 1. ОБНОВЛЕНИЕ ТАБЛИЦЫ USERS (Soft Migration) ---
+        print("👤 Проверяем и обновляем таблицу 'users'...")
+        try:
+            # Добавляем verification_code, если нет
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code VARCHAR(6);"))
+            # Добавляем is_verified, если нет
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;"))
+            print("   -> Таблица 'users' обновлена (данные сохранены).")
+        except Exception as e:
+            print(f"   ⚠️  Ошибка при обновлении users (возможно, уже актуально): {e}")
+
+        # --- 2. ПЕРЕСОЗДАНИЕ ТАБЛИЦ ТАРИФОВ (Hard Reset) ---
+        # Мы удаляем plans и subscriptions, чтобы накатить новую архитектуру для админки
+        print("📉 Пересоздаем таблицы тарифов и подписок...")
+        try:
+            # CASCADE нужен, чтобы удалить зависимости (например, подписки, ссылающиеся на планы)
+            conn.execute(text("DROP TABLE IF EXISTS subscriptions CASCADE;"))
+            conn.execute(text("DROP TABLE IF EXISTS invites CASCADE;"))
+            conn.execute(text("DROP TABLE IF EXISTS plans CASCADE;"))
+            print("   -> Старые таблицы (plans, subscriptions, invites) удалены.")
+        except Exception as e:
+            print(f"   ⚠️  Ошибка при удалении таблиц: {e}")
+
+    # --- 3. СОЗДАНИЕ НОВЫХ ТАБЛИЦ ---
+    print("🏗️  Создаем таблицы с новой структурой SQLAlchemy...")
+    try:
+        # Эта команда создаст plans, subscriptions, invites и любые другие недостающие
+        Base.metadata.create_all(bind=engine)
+        print("✅  Все таблицы успешно созданы/проверены.")
+    except Exception as e:
+        print(f"❌  КРИТИЧЕСКАЯ ОШИБКА создания таблиц: {e}")
+        return
+
+    # --- 4. ЗАЛИВКА БАЗОВЫХ ТАРИФОВ (ОПЦИОНАЛЬНО) ---
+    # Чтобы админка не была пустой, можно сразу вызвать сидер, если он есть.
+    # Но пока просто напомним об этом.
+    print("\n🚀 МИГРАЦИЯ ЗАВЕРШЕНА!")
+    print("1. Таблица юзеров обновлена (админ на месте).")
+    print("2. Тарифы сброшены. Запусти 'init_db.py' или 'seed_plans.py', чтобы создать стандартные тарифы.")
+    print("3. Перезапусти контейнер: docker-compose restart spreadflow_app")
 
 if __name__ == "__main__":
-    fix_database()
+    fix_database_schema()

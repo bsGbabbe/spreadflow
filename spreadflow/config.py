@@ -10,8 +10,16 @@ SMTP_CONFIG = {
     "server": "smtp.gmail.com",
     "port": 587,
     "user": "adm1nistrative.flow@gmail.com",      # <--- ВПИШИ СВОЮ ПОЧТУ
-    "password": "seez wdxg jtbi pgos",     # <--- ВПИШИ ПАРОЛЬ ПРИЛОЖЕНИЯ
+    "password": "seez wdxg jtbi pgos",      # <--- ВПИШИ ПАРОЛЬ ПРИЛОЖЕНИЯ
     "from_email": "noreply@spreadflow.ai"
+}
+
+# === НАСТРОЙКИ CRYPTOCLOUD (ОПЛАТА) ===
+# Добавлено для работы payments.py
+CRYPTOCLOUD_CONFIG = {
+    'api_key': os.getenv('CRYPTO_API_KEY'),
+    'shop_id': os.getenv('CRYPTO_SHOP_ID'),
+    'base_url': 'https://api.cryptocloud.plus/v1' 
 }
 
 # === СПИСОК БИРЖ ===
