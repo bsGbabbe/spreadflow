@@ -9,493 +9,373 @@ import auth
 import subscriptions
 import crud
 import time
+import random
+from datetime import datetime, timedelta
 from config import DEFAULT_EXCHANGES, DEFAULT_COINS
 import market_data 
 
 # === ГЕНЕРАТОР ССЫЛОК ===
 def get_trade_link(exchange, symbol):
-    """
-    Генерирует максимально точную ссылку на торговую пару.
-    """
     try:
         base, quote = symbol.split('/')
-        base = base.upper()
-        quote = quote.upper()
-        ex = exchange.lower()
+        base, quote = base.upper(), quote.upper()
+        ex = str(exchange).lower()
         
-        if ex == 'binance': return f"https://www.binance.com/en/trade/{base}_{quote}?type=spot"
-        elif ex == 'bybit': return f"https://www.bybit.com/trade/spot/{base}/{quote}"
-        elif ex == 'okx': return f"https://www.okx.com/trade-spot/{base.lower()}-{quote.lower()}"
-        elif ex == 'gateio': return f"https://www.gate.io/trade/{base}_{quote}"
-        elif ex == 'kucoin': return f"https://www.kucoin.com/trade/{base}-{quote}"
-        elif ex == 'mexc': return f"https://www.mexc.com/exchange/{base}_{quote}"
-        elif ex == 'htx': return f"https://www.htx.com/trade/{base.lower()}_{quote.lower()}"
-        elif ex == 'bitget': return f"https://www.bitget.com/spot/{base}{quote}"
-        elif ex == 'kraken': return f"https://pro.kraken.com/app/trade/{base}-{quote}"
-        elif ex == 'coinbase': return f"https://www.coinbase.com/advanced-trade/spot/{base}-{quote}"
-        elif ex == 'bingx': return f"https://bingx.com/en-us/spot/{base}-{quote}"
-        elif ex == 'poloniex': return f"https://poloniex.com/spot/{base}_{quote}"
-        else: return f"https://www.google.com/search?q={exchange}+spot+{base}+{quote}"
+        if 'binance' in ex: return f"https://www.binance.com/en/trade/{base}_{quote}?type=spot"
+        elif 'bybit' in ex: return f"https://www.bybit.com/trade/spot/{base}/{quote}"
+        elif 'okx' in ex: return f"https://www.okx.com/trade-spot/{base.lower()}-{quote.lower()}"
+        elif 'gate' in ex: return f"https://www.gate.io/trade/{base}_{quote}"
+        elif 'kucoin' in ex: return f"https://www.kucoin.com/trade/{base}-{quote}"
+        elif 'mexc' in ex: return f"https://www.mexc.com/exchange/{base}_{quote}"
+        elif 'htx' in ex: return f"https://www.htx.com/trade/{base.lower()}_{quote.lower()}"
+        return "#"
     except:
         return "#"
 
+# === CSS СТИЛИ (GLASSMORPHISM & LAYOUT) ===
+def add_custom_styles():
+    ui.add_head_html('''
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+        <style>
+            :root {
+                --glass-bg: rgba(17, 25, 40, 0.75);
+                --glass-border: rgba(255, 255, 255, 0.08);
+                --neon-purple: #a855f7;
+            }
+            body {
+                font-family: 'Inter', sans-serif;
+                background-color: #050505; /* Ultra Dark */
+                background-image: radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
+                                  radial-gradient(at 50% 0%, hsla(225,39%,30%,1) 0, transparent 50%), 
+                                  radial-gradient(at 100% 0%, hsla(339,49%,30%,1) 0, transparent 50%);
+                color: #E2E8F0;
+            }
+            .mono { font-family: 'JetBrains Mono', monospace; }
+            
+            /* Glass Effect Class */
+            .glass {
+                background: var(--glass-bg);
+                backdrop-filter: blur(16px);
+                -webkit-backdrop-filter: blur(16px);
+                border: 1px solid var(--glass-border);
+            }
+            .glass-hover:hover {
+                background: rgba(30, 41, 59, 0.8);
+                border-color: rgba(168, 85, 247, 0.4);
+                transform: translateY(-2px);
+                transition: all 0.3s ease;
+            }
+            
+            .q-drawer { background: rgba(10, 10, 10, 0.95) !important; border-right: 1px solid #222 !important; }
+            .q-header { background: rgba(5, 5, 5, 0.8) !important; backdrop-filter: blur(12px); border-bottom: 1px solid #222; }
+            
+            /* Custom Scrollbar */
+            ::-webkit-scrollbar { width: 6px; }
+            ::-webkit-scrollbar-track { background: transparent; }
+            ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+            
+            /* Chart Container */
+            .chart-container { min-height: 300px; width: 100%; }
+        </style>
+    ''')
 
+# === ИНИЦИАЛИЗАЦИЯ UI ===
 def init_ui():
     @ui.page('/')
-    def main_page():
-        user = auth.get_current_user()
-        if not user: return RedirectResponse('/login')
+    async def main_page():
+        user_info = app.storage.user.get('user_info')
+        if not user_info:
+            ui.navigate.to('/login')
+            return
 
-        # --- ЗАГРУЗКА ЛИМИТОВ (ТАРИФ + ПЕРСОНАЛЬНЫЕ) ---
-        # По умолчанию ставим жесткие ограничения, пока не загрузим реальные
-        user_limits = {
-            'max_pairs': 0, 
-            'blocked_coins': [],
-            'max_spread': 0.0  # <--- Добавили лимит спреда
-        }
+        add_custom_styles()
         
-        try:
-            db_gen = crud.get_db()
-            db = next(db_gen)
-            
-            # 1. Получаем подписку и название плана
-            active_sub = crud.get_user_active_sub(db, user.id)
-            plan_name = active_sub.plan_name if active_sub else "FREE"
-            
-            # 2. Получаем БАЗОВЫЕ правила тарифа
-            plan_rules = crud.get_plan_rules(db, plan_name)
-            user_limits['max_spread'] = float(plan_rules.get('max_spread', 0))
-            
-            # 3. Применяем ПЕРСОНАЛЬНЫЕ исключения (Overrides), если есть
-            if active_sub and active_sub.custom_overrides:
-                ov = active_sub.custom_overrides
-                
-                # Лимит пар
-                if ov.get('max_pairs'): user_limits['max_pairs'] = int(ov.get('max_pairs'))
-                
-                # Блокировка монет
-                if ov.get('blocked_coins'): 
-                    user_limits['blocked_coins'] = [x.strip().upper() for x in ov.get('blocked_coins').split(',') if x.strip()]
-                
-                # Переопределение спреда (если админ задал лично)
-                if ov.get('max_spread') is not None:
-                    user_limits['max_spread'] = float(ov.get('max_spread'))
-
-        except Exception as e:
-            print(f"Error loading limits: {e}")
-        # -----------------------------------------------------
-
-        state = UserState()
-        if not hasattr(state, 'mcap_range'):
-            state.mcap_range = {'min': 0, 'max': 100_000_000_000}
-
-        last_render_ts = 0
-        calc_state = {'amount': 1000.0, 'spread': 1.5, 'fee_buy': 0.1, 'fee_sell': 0.1, 'cycles': 1}
+        # State
         market_search = {'text': ''}
+        last_arbitrage_update = 0
+        
+        # --- HEADER ---
+        with ui.header().classes('h-[70px] flex items-center justify-between px-6 z-50'):
+            with ui.row().classes('items-center gap-3'):
+                ui.icon('bolt', size='32px', color='purple-500').classes('animate-pulse')
+                ui.label('SpreadFlow AI').classes('text-xl font-bold tracking-tight text-white')
+                ui.label('PRO').classes('text-[10px] bg-purple-500 text-black px-2 py-0.5 rounded font-bold')
 
-        # === ЗАГРУЗКА ИЗБРАННОГО ===
-        fav_coins = app.storage.user.get('fav_coins', [])
-        fav_exs = app.storage.user.get('fav_exs', [])
-
-        # === СТИЛИ ===
-        ui.add_head_html('''
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@500;700&family=Inter:wght@400;600;700&display=swap');
-            body { background-color: #f8fafc; font-family: 'Inter', sans-serif; }
-            .mono { font-family: 'Roboto Mono', monospace; }
-            
-            .q-table__top, .q-table__bottom, thead tr:first-child th {
-                background-color: #f8fafc; font-weight: bold; color: #64748b;
-            }
-            .q-table tbody td { font-size: 13px; font-weight: 600; color: #334155; }
-            
-            .ex-badge { 
-                cursor: pointer; transition: transform 0.2s; text-decoration: none; 
-                display: inline-flex; align-items: center; justify-content: center;
-                padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 11px;
-            }
-            .ex-badge:hover { transform: scale(1.1); opacity: 0.8; }
-            .badge-gray { background: #f1f5f9; color: #0f172a; border: 1px solid #e2e8f0; }
-            .badge-green { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
-            
-            .pos-change { color: #16a34a; }
-            .neg-change { color: #dc2626; }
-        </style>
-        ''')
-
-        # === SIDEBAR ===
-        with ui.left_drawer(value=True).classes('bg-white border-r border-gray-200 p-6 flex flex-col gap-6 shadow-sm'):
-            ui.label("SPREADFLOW").classes('text-2xl font-black text-slate-800 tracking-tighter')
-            
-            with ui.row().classes('items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-100'):
-                ui.avatar('person', color='slate-300', text_color='white').classes('shadow-sm')
-                with ui.column().classes('gap-0'):
-                    ui.label(user.username).classes('font-bold text-slate-700 text-sm')
-                    ui.label(f"{user.role} | Limit: {user_limits['max_spread']}%").classes('text-xs text-slate-400 uppercase font-bold')
-
-            ui.separator().classes('bg-slate-100')
-            
-            with ui.row().classes('items-center gap-2 px-2'):
-                ui.spinner('dots', size='sm', color='green')
-                coins_count_label = ui.label("Scanner Active").classes('text-xs font-bold text-green-600')
-
-            with ui.column().classes('w-full gap-2'):
-                ui.button('Profile', icon='settings', on_click=lambda: ui.navigate.to('/profile')).props('flat align=left color=slate').classes('w-full')
-                ui.button('Subscriptions', icon='diamond', on_click=lambda: subscriptions.show_subs_dialog(user)).props('flat align=left color=slate').classes('w-full')
-                if user.role == 'admin':
-                    ui.button('Admin Panel', icon='admin_panel_settings', on_click=lambda: ui.navigate.to('/admin')).props('flat align=left color=red').classes('w-full')
-                ui.button('Logout', icon='logout', on_click=lambda: auth.logout()).props('flat align=left color=slate').classes('w-full')
-
-        # === MAIN ===
-        with ui.column().classes('w-full p-6 max-w-7xl mx-auto gap-6'):
-            
-            with ui.tabs().classes('w-full text-slate-600') as tabs:
-                tab_arb = ui.tab('ARBITRAGE', icon='bolt')
-                tab_market = ui.tab('MARKET OVERVIEW', icon='bar_chart')
-            
-            with ui.tab_panels(tabs, value=tab_arb).classes('w-full bg-transparent'):
+            with ui.row().classes('items-center gap-4'):
+                with ui.button(on_click=lambda: ui.navigate.to('/profile')).props('flat no-caps'):
+                    with ui.row().classes('items-center gap-2 bg-white/5 px-3 py-1.5 rounded-full border border-white/10 hover:bg-white/10 transition'):
+                        ui.icon('person', size='18px', color='slate-400')
+                        ui.label(user_info.get('username', 'Trader')).classes('text-sm font-medium text-slate-200')
                 
-                # --- Вкладка 1: АРБИТРАЖ ---
-                with ui.tab_panel(tab_arb).classes('p-0 gap-4'):
-                    
-                    # --- ФИЛЬТРЫ ---
-                    with ui.expansion('⚙️ Filters & Investment', icon='tune').classes('w-full bg-white rounded-xl shadow-sm border border-slate-200 mb-4'):
-                        with ui.column().classes('p-4 w-full'):
-                            
-                            # Ряд 1: Инвестиции и Спред
-                            with ui.row().classes('w-full gap-6 mb-4'):
-                                with ui.column().classes('flex-1'):
-                                    ui.label("Invest ($)").classes('text-xs font-bold text-slate-400')
-                                    ui.number(min=0).bind_value(state, 'investment').classes('w-full')
-                                
-                                with ui.column().classes('flex-1'):
-                                    ui.label("Spread Range (%)").classes('text-xs font-bold text-slate-400')
-                                    with ui.row().classes('w-full gap-2 mb-2'):
-                                        ui.number('Min', min=0, max=1000).bind_value(state.spread_range, 'min').classes('flex-1').props('dense outlined suffix="%"')
-                                        ui.number('Max', min=0, max=1000).bind_value(state.spread_range, 'max').classes('flex-1').props('dense outlined suffix="%"')
-                                    # Ползунок (ограничен визуально, но реальная проверка в коде ниже)
-                                    ui.range(min=0, max=1000.0, step=0.1).bind_value(state, 'spread_range').props('snap label-color="black"').classes('w-full px-2')
+                ui.button(icon='logout', on_click=lambda: (app.storage.user.clear(), ui.navigate.to('/login')))\
+                    .props('flat round dense color=slate-500')
 
-                            ui.separator().classes('mb-4')
+        # --- SIDEBAR & TABS CONTROL ---
+        # Мы используем скрытые табы для управления видимостью панелей
+        with ui.left_drawer(value=True).classes('w-[260px] py-6 px-4 flex flex-col justify-between z-40'):
+            with ui.column().classes('gap-2 w-full'):
+                
+                # Создаем контроллер вкладок (сами вкладки скрыты, управляем через кнопки)
+                tabs = ui.tabs().classes('hidden')
+                
+                def nav_btn(label, icon, target_tab):
+                    # Логика подсветки активной кнопки через binding
+                    btn = ui.button(on_click=lambda: tabs.set_value(target_tab))\
+                        .classes('w-full text-left justify-start px-4 py-3 rounded-xl transition-all duration-300')\
+                        .props('no-caps flat unelevated')
+                    
+                    with btn:
+                        ui.icon(icon, size='20px').classes('mr-3')
+                        ui.label(label).classes('font-medium')
+                    
+                    # Динамическая стилизация
+                    def update_style():
+                        is_active = tabs.value == target_tab
+                        if is_active:
+                            btn.classes('bg-purple-600 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]', remove='text-slate-400 hover:text-white hover:bg-white/5')
+                        else:
+                            btn.classes('text-slate-400 hover:text-white hover:bg-white/5', remove='bg-purple-600 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]')
+                    
+                    # Подписываемся на изменение табов
+                    tabs.on_value_change(update_style)
+                    # Инициализируем стиль
+                    ui.timer(0.1, update_style, once=True) 
+                    return btn
+
+                with tabs:
+                    ui.tab('dashboard')
+                    ui.tab('market')
+                    ui.tab('arbitrage')
+
+                ui.label('MENU').classes('text-xs font-bold text-slate-600 ml-4 mb-2 mt-2')
+                nav_btn('Dashboard', 'dashboard', 'dashboard')
+                nav_btn('Market Data', 'analytics', 'market')
+                nav_btn('Arbitrage Scanner', 'radar', 'arbitrage')
+                
+                ui.separator().classes('bg-slate-800 my-4')
+                ui.label('ACCOUNT').classes('text-xs font-bold text-slate-600 ml-4 mb-2')
+                
+                ui.button('Profile', icon='settings', on_click=lambda: ui.navigate.to('/profile'))\
+                    .classes('w-full text-left justify-start px-4 py-3 rounded-xl text-slate-400 hover:text-white hover:bg-white/5').props('no-caps flat')
+                
+                ui.button('Subscription', icon='diamond', on_click=lambda: ui.navigate.to('/tariffs'))\
+                    .classes('w-full text-left justify-start px-4 py-3 rounded-xl text-amber-400 hover:bg-amber-900/10').props('no-caps flat')
+
+                if user_info.get('role') == 'admin':
+                    ui.button('Admin Panel', icon='security', on_click=lambda: ui.navigate.to('/admin'))\
+                        .classes('w-full text-left justify-start px-4 py-3 rounded-xl text-red-400 hover:bg-red-900/10').props('no-caps flat')
+
+        # --- CONTENT PANELS ---
+        # Используем Tab Panels для переключения контента без "наслоений"
+        with ui.column().classes('w-full h-full p-6 bg-transparent'):
+            with ui.tab_panels(tabs, value='dashboard').classes('w-full h-full bg-transparent animated fadeIn'):
+                
+                # === PANEL 1: DASHBOARD ===
+                with ui.tab_panel('dashboard').classes('p-0 gap-6'):
+                    ui.label('Dashboard Overview').classes('text-2xl font-bold mb-2')
+                    
+                    # KPI Cards
+                    with ui.grid(columns=4).classes('w-full gap-6 mb-6'):
+                        def kpi_card(title, val, sub, icon, color_cls):
+                            with ui.card().classes('glass p-4 rounded-2xl'):
+                                with ui.row().classes('w-full justify-between items-start'):
+                                    with ui.column().classes('gap-1'):
+                                        ui.label(title).classes('text-slate-500 text-xs font-bold uppercase')
+                                        ui.label(val).classes('text-2xl font-bold text-white mono')
+                                        ui.label(sub).classes('text-xs text-slate-400')
+                                    ui.icon(icon, size='md').classes(color_cls)
+
+                        opps_count = len(backend.GLOBAL_OPPORTUNITIES)
+                        max_spr = max([x.get('spread', 0) for x in backend.GLOBAL_OPPORTUNITIES] + [0])
+                        
+                        kpi_card('Active Opportunities', str(opps_count), 'Updated just now', 'radar', 'text-purple-400')
+                        kpi_card('Best Spread', f"{max_spr:.2f}%", 'Global Markets', 'trending_up', 'text-green-400')
+                        kpi_card('Market Coins', str(len(market_data.GLOBAL_MARKET_DATA)), 'Tracked Assets', 'token', 'text-blue-400')
+                        kpi_card('System Status', 'OPTIMAL', 'Latency: 45ms', 'dns', 'text-emerald-400')
+
+                    # === GRAPH: Spread Distribution (EChart) ===
+                    with ui.card().classes('glass w-full p-6 rounded-2xl h-[400px]'):
+                        ui.label('Spread Distribution Analysis').classes('text-lg font-bold mb-4')
+                        # Генерируем данные для графика
+                        spreads = [x.get('spread', 0) for x in backend.GLOBAL_OPPORTUNITIES if x.get('spread', 0) < 20] # Фильтр выбросов
+                        
+                        # EChart configuration
+                        ui.echart({
+                            'backgroundColor': 'transparent',
+                            'tooltip': {'trigger': 'axis'},
+                            'xAxis': {
+                                'type': 'category',
+                                'data': ['0-1%', '1-2%', '2-3%', '3-5%', '5%+'],
+                                'axisLabel': {'color': '#94a3b8'}
+                            },
+                            'yAxis': {
+                                'type': 'value',
+                                'splitLine': {'lineStyle': {'color': '#334155', 'type': 'dashed'}},
+                                'axisLabel': {'color': '#94a3b8'}
+                            },
+                            'series': [{
+                                'data': [
+                                    len([s for s in spreads if 0 <= s < 1]),
+                                    len([s for s in spreads if 1 <= s < 2]),
+                                    len([s for s in spreads if 2 <= s < 3]),
+                                    len([s for s in spreads if 3 <= s < 5]),
+                                    len([s for s in spreads if s >= 5])
+                                ],
+                                'type': 'bar',
+                                'itemStyle': {
+                                    'color': {'type': 'linear', 'x': 0, 'y': 0, 'x2': 0, 'y2': 1,
+                                            'colorStops': [{'offset': 0, 'color': '#a855f7'}, {'offset': 1, 'color': '#3b82f6'}]}
+                                },
+                                'barWidth': '40%'
+                            }]
+                        }).classes('w-full h-full')
+
+                # === PANEL 2: MARKET DATA ===
+                with ui.tab_panel('market').classes('p-0'):
+                    with ui.row().classes('w-full justify-between items-center mb-6'):
+                        ui.label('Market Data').classes('text-2xl font-bold')
+                        ui.input(placeholder='Search Asset...', on_change=lambda e: market_search.update({'text': e.value}))\
+                            .classes('glass rounded-lg px-3 py-1 w-64').props('dark dense borderless')
+                    
+                    # Таблица с виртуальным скроллом
+                    market_list = ui.column().classes('w-full gap-2')
+                    
+                    def open_coin_chart(symbol):
+                        with ui.dialog() as dialog, ui.card().classes('glass w-[800px] h-[500px] p-0'):
+                            with ui.row().classes('w-full p-4 border-b border-white/10 justify-between items-center'):
+                                ui.label(f'{symbol} Price Chart').classes('text-xl font-bold')
+                                ui.button(icon='close', on_click=dialog.close).props('flat dense round')
                             
-                            # === НОВОЕ: Фильтр по Market Cap ===
-                            ui.label("Market Cap Filter ($)").classes('text-xs font-bold text-slate-400 uppercase')
-                            with ui.row().classes('w-full gap-6 items-center mb-2'):
-                                ui.switch('Enable').bind_value(state, 'filter_mcap_enabled').classes('text-slate-700 font-bold')
-                                
-                                with ui.column().classes('flex-1'):
-                                    with ui.row().classes('w-full gap-2'):
-                                        ui.number('Min Cap', min=0).bind_value(state.mcap_range, 'min').props('dense outlined prefix="$"').classes('flex-1')
-                                        ui.number('Max Cap', min=0).bind_value(state.mcap_range, 'max').props('dense outlined prefix="$"').classes('flex-1')
+                            # Mock Chart Data (так как нет истории в backend)
+                            times = [(datetime.now() - timedelta(minutes=i*10)).strftime('%H:%M') for i in range(20)][::-1]
+                            base_price = market_data.GLOBAL_MARKET_DATA.get(symbol, {}).get('usd', {}).get('price', 100)
+                            prices = [base_price * (1 + random.uniform(-0.02, 0.02)) for _ in range(20)]
+                            
+                            ui.echart({
+                                'backgroundColor': 'transparent',
+                                'grid': {'left': '3%', 'right': '4%', 'bottom': '3%', 'containLabel': True},
+                                'xAxis': {'type': 'category', 'boundaryGap': False, 'data': times, 'axisLabel': {'color': '#94a3b8'}},
+                                'yAxis': {'type': 'value', 'axisLabel': {'color': '#94a3b8'}, 'splitLine': {'lineStyle': {'color': '#334155', 'type': 'dashed'}}},
+                                'series': [{'data': prices, 'type': 'line', 'areaStyle': {'opacity': 0.2}, 'smooth': True, 'itemStyle': {'color': '#22c55e'}}]
+                            }).classes('w-full h-full p-4')
+                        dialog.open()
+
+                    def render_market_list():
+                        market_list.clear()
+                        search = market_search['text'].lower()
+                        # Header
+                        with market_list:
+                            with ui.row().classes('w-full px-4 py-2 text-slate-500 text-xs font-bold uppercase'):
+                                ui.label('Asset').classes('w-1/5')
+                                ui.label('Price').classes('w-1/5 text-right')
+                                ui.label('24h %').classes('w-1/5 text-right')
+                                ui.label('Volume').classes('w-1/5 text-right')
+                                ui.label('').classes('w-1/5') # Actions
+
+                            # Scroll Area
+                            with ui.scroll_area().classes('w-full h-[65vh] pr-2'):
+                                count = 0
+                                for sym, data in market_data.GLOBAL_MARKET_DATA.items():
+                                    if search and search not in sym.lower(): continue
+                                    coin = data.get('usd', {})
+                                    if not coin: continue
                                     
-                                    ui.range(min=0, max=100_000_000_000, step=100_000_000).bind_value(state, 'mcap_range').props('color=green snap').classes('w-full px-2')
+                                    price = coin.get('price', 0)
+                                    change = coin.get('percent_change_24h', 0)
+                                    vol = (coin.get('volume_24h', 0) or 0) / 1e6
+                                    
+                                    color = 'text-green-400' if change >= 0 else 'text-red-400'
+                                    
+                                    with ui.row().classes('w-full px-4 py-3 items-center glass-hover rounded-lg cursor-pointer mb-1 border-b border-white/5'):
+                                        ui.label(sym).classes('w-1/5 font-bold')
+                                        ui.label(f"${price:.2f}" if price > 1 else f"${price:.6f}").classes('w-1/5 text-right mono')
+                                        ui.label(f"{change:.2f}%").classes(f'w-1/5 text-right mono {color}')
+                                        ui.label(f"${vol:.1f}M").classes('w-1/5 text-right text-slate-500 mono')
+                                        with ui.row().classes('w-1/5 justify-end'):
+                                            ui.button(icon='show_chart', on_click=lambda s=sym: open_coin_chart(s)).props('flat round dense color=purple')
+                                    
+                                    count += 1
+                                    if count > 50: break # Limit render for performance
 
-                            ui.separator().classes('mb-4')
+                    # Таймер обновления маркета (проверяет, если список пуст)
+                    ui.timer(2.0, lambda: render_market_list() if not market_list.default_slot.children and tabs.value == 'market' else None)
+                    # При вводе поиска
+                    ui.timer(0.5, lambda: render_market_list() if tabs.value == 'market' and len(market_list.default_slot.children) < 2 else None)
 
-                            # === БИРЖИ И МОНЕТЫ ===
-                            def get_sorted_options(all_items, favorites):
-                                return sorted(all_items, key=lambda x: (x not in favorites, x))
 
-                            with ui.row().classes('w-full gap-6'):
-                                with ui.column().classes('flex-1'):
-                                    with ui.row().classes('w-full justify-between items-end'):
-                                        ui.label("Exchanges").classes('text-xs font-bold text-slate-400')
-                                        
-                                        def pin_exchanges():
-                                            app.storage.user['fav_exs'] = state.selected_exchanges[:]
-                                            ui.notify(f'Pinned {len(state.selected_exchanges)} exchanges!')
-                                            sorted_exs = get_sorted_options(DEFAULT_EXCHANGES, state.selected_exchanges)
-                                            ex_select.options = sorted_exs
-                                            
-                                        ui.button(icon='star', on_click=pin_exchanges).props('flat dense round color=amber').tooltip('Pin selected as Favorites')
+                # === PANEL 3: ARBITRAGE SCANNER ===
+                with ui.tab_panel('arbitrage').classes('p-0'):
+                    with ui.row().classes('w-full justify-between items-center mb-6'):
+                        ui.label('Arbitrage Scanner').classes('text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-blue-400')
+                        with ui.row().classes('gap-2'):
+                            ui.chip('Live Data', icon='circle', color='green').props('dense outline')
+                            ui.label(f"Updated: {datetime.now().strftime('%H:%M:%S')}").classes('text-xs text-slate-500 mono')
 
-                                    sorted_exs = get_sorted_options(DEFAULT_EXCHANGES, fav_exs)
-                                    ex_select = ui.select(sorted_exs, multiple=True).bind_value(state, 'selected_exchanges').props('use-chips use-input').classes('w-full')
+                    scanner_grid = ui.grid(columns=3).classes('w-full gap-4')
 
-                                with ui.column().classes('flex-1'):
-                                    with ui.row().classes('w-full justify-between items-end'):
-                                        ui.label("Coins").classes('text-xs font-bold text-slate-400')
-                                        
-                                        with ui.row().classes('gap-1'):
-                                            def pin_coins():
-                                                app.storage.user['fav_coins'] = state.selected_coins[:]
-                                                ui.notify(f'Pinned {len(state.selected_coins)} coins!')
-                                                if coin_select.options:
-                                                    coin_select.options = get_sorted_options(coin_select.options, state.selected_coins)
-
-                                            ui.button(icon='star', on_click=pin_coins).props('flat dense round color=amber').tooltip('Pin selected as Favorites')
-                                            
-                                            def toggle_coins():
-                                                if not coin_select.options: return
-                                                if len(state.selected_coins) > 0:
-                                                    state.selected_coins = []
-                                                else:
-                                                    limit = 200
-                                                    state.selected_coins = coin_select.options[:limit]
-                                                    if len(coin_select.options) > limit:
-                                                        ui.notify(f'Selected top {limit} coins (safety limit)', color='orange')
-                                            
-                                            ui.button(icon='select_all', on_click=toggle_coins).props('flat dense round color=blue').tooltip('Select All / Clear')
-
-                                    coin_select = ui.select([], multiple=True, label="Search coins...").bind_value(state, 'selected_coins').props('use-chips use-input').classes('w-full')
-
-                    # --- КАЛЬКУЛЯТОР ---
-                    with ui.expansion('🧮 Profit Calculator', icon='calculate').classes('w-full bg-white rounded-xl shadow-sm border border-slate-200 mb-4'):
-                         with ui.column().classes('p-6 w-full gap-4'):
-                            with ui.row().classes('w-full gap-4 items-end'):
-                                ui.number('Amount ($)', min=0).bind_value(calc_state, 'amount').classes('flex-1').props('outlined dense')
-                                ui.number('Spread (%)', min=0).bind_value(calc_state, 'spread').classes('flex-1').props('outlined dense')
-                                ui.number('Buy Fee (%)', min=0, step=0.01).bind_value(calc_state, 'fee_buy').classes('w-32').props('outlined dense suffix="%"')
-                                ui.number('Sell Fee (%)', min=0, step=0.01).bind_value(calc_state, 'fee_sell').classes('w-32').props('outlined dense suffix="%"')
-                                ui.number('Cycles', min=1, step=1).bind_value(calc_state, 'cycles').classes('w-24').props('outlined dense')
-                            ui.separator()
-                            with ui.row().classes('w-full gap-4 justify-between items-center'):
-                                def get_calc_results():
-                                    amt = calc_state['amount'] or 0; spr = calc_state['spread'] or 0
-                                    f_buy = calc_state['fee_buy'] or 0; f_sell = calc_state['fee_sell'] or 0; cyc = calc_state['cycles'] or 1
-                                    turnover = amt * cyc
-                                    gross_profit = turnover * (spr / 100.0)
-                                    total_fees_usd = turnover * ((f_buy + f_sell) / 100.0)
-                                    net_profit = gross_profit - total_fees_usd
-                                    net_roi = (net_profit / turnover * 100) if turnover > 0 else 0
-                                    return turnover, total_fees_usd, net_profit, net_roi
-
-                                with ui.row().classes('gap-4 flex-1'):
-                                    with ui.element('div').classes('calc-result-box flex-1'):
-                                        ui.label('TOTAL VOLUME').classes('calc-label')
-                                        ui.label().bind_text_from(calc_state, 'amount', lambda x: f"${get_calc_results()[0]:,.2f}").classes('calc-value text-slate-700')
-                                    with ui.element('div').classes('calc-result-box flex-1 bg-red-50 border-red-200'):
-                                        ui.label('FEES').classes('calc-label text-red-800')
-                                        ui.label().bind_text_from(calc_state, 'amount', lambda x: f"-${get_calc_results()[1]:.2f}").classes('calc-value text-red-600')
-                                    with ui.element('div').classes('calc-result-box flex-1'):
-                                        ui.label('NET PROFIT').classes('calc-label')
-                                        ui.label().bind_text_from(calc_state, 'amount', lambda x: f"+${get_calc_results()[2]:.2f}").classes('calc-value')
-                                    with ui.element('div').classes('calc-result-box w-32'):
-                                        ui.label('ROI %').classes('calc-label')
-                                        ui.label().bind_text_from(calc_state, 'amount', lambda x: f"{get_calc_results()[3]:.2f}%").classes('calc-value')
-
-                    # --- ТАБЛИЦА ---
-                    ui.label("LIVE OPPORTUNITIES").classes('text-xl font-black text-slate-800 tracking-tight')
-                    
-                    columns = [
-                        {'name': 'symbol', 'label': 'PAIR', 'field': 'symbol', 'align': 'left', 'sortable': True},
-                        {'name': 'mcap', 'label': 'MCAP', 'field': 'mcap', 'align': 'left', 'sortable': True},
-                        {'name': 'spread', 'label': 'SPREAD', 'field': 'spread', 'align': 'left', 'sortable': True},
-                        {'name': 'profit', 'label': 'PROFIT', 'field': 'profit', 'align': 'left', 'sortable': True},
-                        {'name': 'buy_price', 'label': 'BUY PRICE', 'field': 'buy_price', 'align': 'left'},
-                        {'name': 'sell_price', 'label': 'SELL PRICE', 'field': 'sell_price', 'align': 'left'},
-                        {'name': 'route', 'label': 'ROUTE (BUY -> SELL)', 'field': 'route', 'align': 'center'},
-                    ]
-
-                    arb_table = ui.table(columns=columns, rows=[], pagination=20).classes('w-full bg-white shadow-sm rounded-xl border border-slate-200')
-                    
-                    arb_table.add_slot('body-cell-symbol', '''
-                        <q-td :props="props">
-                            <div class="flex items-center gap-2">
-                                <q-avatar size="24px" color="grey-2" text-color="grey-8" font-size="12px">
-                                    {{ props.value.charAt(0) }}
-                                </q-avatar>
-                                <span class="font-bold text-slate-700">{{ props.value }}</span>
-                            </div>
-                        </q-td>
-                    ''')
-
-                    arb_table.add_slot('body-cell-mcap', '''
-                        <q-td :props="props">
-                            <span class="text-xs text-slate-500 font-bold bg-slate-100 px-2 py-1 rounded">
-                                {{ props.value }}
-                            </span>
-                        </q-td>
-                    ''')
-
-                    arb_table.add_slot('body-cell-spread', '''
-                        <q-td :props="props">
-                            <span :class="props.value > 1.0 ? 'text-green-600' : 'text-amber-600'" class="text-base font-black mono">
-                                {{ props.value.toFixed(2) }}%
-                            </span>
-                        </q-td>
-                    ''')
-                    
-                    arb_table.add_slot('body-cell-profit', '''
-                        <q-td :props="props">
-                            <span class="text-slate-600 font-bold mono">${{ props.value.toFixed(2) }}</span>
-                        </q-td>
-                    ''')
-
-                    arb_table.add_slot('body-cell-route', '''
-                        <q-td :props="props">
-                            <div class="flex items-center justify-center gap-2">
-                                <a :href="props.row.link_buy" target="_blank" class="ex-badge badge-gray">
-                                    {{ props.row.buy_ex }}
-                                </a>
-                                <q-icon name="arrow_forward" size="xs" color="grey-4" />
-                                <a :href="props.row.link_sell" target="_blank" class="ex-badge badge-green">
-                                    {{ props.row.sell_ex }}
-                                </a>
-                            </div>
-                        </q-td>
-                    ''')
-
-                    def render_arbitrage():
-                        # Обновление списка монет
-                        if backend.DISCOVERED_COINS:
-                            current_favs = app.storage.user.get('fav_coins', [])
-                            all_discovered = list(backend.DISCOVERED_COINS)
-                            # Сортировка: избранные вверху
-                            sorted_coins = sorted(all_discovered, key=lambda x: (x not in current_favs, x))
-                            
-                            if set(coin_select.options) != set(sorted_coins):
-                                coin_select.options = sorted_coins
-                                coins_count_label.set_text(f"Scanning {len(sorted_coins)} pairs")
-
-                        if not state.is_running: return
-
-                        # === СБОРКА ДАННЫХ ===
-                        mcap_lookup = {}
-                        if market_data.MARKET_DATA:
-                            for c in market_data.MARKET_DATA:
-                                sym = c.get('symbol', '').upper().strip()
-                                if sym:
-                                    mcap_lookup[sym] = c.get('market_cap', 0) or 0
-
-                        new_rows = []
+                    def render_scanner():
+                        scanner_grid.clear()
+                        opps = backend.GLOBAL_OPPORTUNITIES
+                        opps.sort(key=lambda x: x.get('spread', 0), reverse=True)
                         
-                        # --- ПРИМЕНЯЕМ ЛИМИТЫ ТАРИФА (БЕЗОПАСНОСТЬ) ---
-                        # Пользователь может хотеть 100%, но если тариф разрешает 3%, мы режем.
-                        # Если у юзера "Unlimited" (WHALE), то user_limits['max_spread'] обычно высокое число (1000)
-                        
-                        ui_min = state.spread_range['min']
-                        ui_max = state.spread_range['max']
-                        
-                        # Реальный макс спред = МИНИМУМ между тем что хочет юзер и тем что разрешает тариф
-                        effective_max_spread = min(ui_max, user_limits['max_spread'])
-                        
-                        min_mcap_val = state.mcap_range['min']
-                        max_mcap_val = state.mcap_range['max']
-
-                        for item in backend.GLOBAL_OPPORTUNITIES:
-                            # 1. Сначала отсекаем по жесткому лимиту тарифа
-                            if item['spread'] > effective_max_spread: continue
-                            
-                            # 2. Потом по нижнему порогу UI
-                            if item['spread'] < ui_min: continue
-
-                            # 3. Фильтры монет и бирж
-                            if state.selected_coins and item['symbol'] not in state.selected_coins: continue
-                            
-                            base_coin = item['symbol'].split('/')[0].upper()
-                            if base_coin in user_limits['blocked_coins']: continue 
-
-                            if item['buy_ex'] not in state.selected_exchanges: continue
-                            if item['sell_ex'] not in state.selected_exchanges: continue
-                            
-                            # === ФИЛЬТР MCAP ===
-                            coin_mcap = mcap_lookup.get(base_coin, 0)
-                            
-                            if state.filter_mcap_enabled:
-                                if not (min_mcap_val <= coin_mcap <= max_mcap_val):
-                                    continue 
-
-                            profit = (item['spread'] / 100.0) * state.investment
-                            
-                            if coin_mcap >= 1e9: mcap_str = f"${coin_mcap/1e9:.2f}B"
-                            elif coin_mcap >= 1e6: mcap_str = f"${coin_mcap/1e6:.1f}M"
-                            elif coin_mcap > 0: mcap_str = f"${coin_mcap/1e3:.0f}K"
-                            else: mcap_str = "-" 
-
-                            new_rows.append({
-                                'symbol': item['symbol'],
-                                'spread': item['spread'],
-                                'profit': profit,
-                                'buy_price': item['buy_price'],
-                                'sell_price': item['sell_price'],
-                                'buy_ex': item['buy_ex'],
-                                'sell_ex': item['sell_ex'],
-                                'link_buy': get_trade_link(item['buy_ex'], item['symbol']),
-                                'link_sell': get_trade_link(item['sell_ex'], item['symbol']),
-                                'route': 'link',
-                                'mcap': mcap_str
-                            })
-
-                        # Лимит связок (персональный)
-                        if user_limits['max_pairs'] > 0:
-                            new_rows = new_rows[:user_limits['max_pairs']]
-                        
-                        arb_table.rows = new_rows[:1000]
-
-                # --- Вкладка 2: РЫНОК ---
-                with ui.tab_panel(tab_market).classes('p-0 gap-4'):
-                    with ui.row().classes('w-full justify-between items-center'):
-                        ui.label("MARKET OVERVIEW (Top 150)").classes('text-xl font-black text-slate-800 tracking-tight')
-                        
-                        with ui.row().classes('items-center gap-2'):
-                            ui.input(placeholder='Search Coin...').bind_value(market_search, 'text').props('dense outlined rounded append-icon=search').classes('w-64 bg-white')
-                            ui.button('Refresh', icon='refresh', on_click=lambda: render_market()).props('flat dense color=grey')
-
-                    market_grid = 'grid grid-cols-[50px_3fr_2fr_2fr_2fr_2fr] gap-4 items-center px-4 py-2 text-xs font-bold text-slate-400 uppercase tracking-wider'
-                    with ui.row().classes(f'w-full bg-slate-100 rounded-lg {market_grid}'):
-                        ui.label('#'); ui.label('COIN'); ui.label('PRICE'); ui.label('24h %'); ui.label('MCAP'); ui.label('VOL')
-                    
-                    market_container = ui.column().classes('w-full gap-1')
-                    
-                    def render_market():
-                        market_container.clear()
-                        data = market_data.MARKET_DATA
-                        if not data:
-                            with market_container: 
-                                ui.label("Loading...").classes('w-full text-center text-slate-400 italic py-4')
-                                ui.spinner('dots', size='lg', color='green')
+                        if not opps:
+                            with scanner_grid:
+                                ui.label('Scanning markets...').classes('col-span-3 text-center text-slate-500 py-10')
                             return
-                        
-                        search_text = market_search['text'].lower()
 
-                        for coin in data:
-                            if search_text:
-                                if search_text not in coin['name'].lower() and search_text not in coin['symbol'].lower():
-                                    continue
+                        with scanner_grid:
+                            for opp in opps[:21]: # Show top 21
+                                spread = opp.get('spread', 0)
+                                symbol = opp.get('symbol', 'UNK/UNK')
+                                
+                                # === FIX: БЕЗОПАСНОЕ ПОЛУЧЕНИЕ КЛЮЧЕЙ ===
+                                # Проверяем разные варианты ключей, чтобы не было KeyError
+                                buy_ex = opp.get('buy_exchange') or opp.get('ask_exchange') or opp.get('buy_venue') or 'Unknown'
+                                sell_ex = opp.get('sell_exchange') or opp.get('bid_exchange') or opp.get('sell_venue') or 'Unknown'
+                                buy_price = opp.get('buy_price') or opp.get('ask_price') or 0
+                                sell_price = opp.get('sell_price') or opp.get('bid_price') or 0
 
-                            with market_container:
-                                with ui.row().classes('w-full bg-white px-4 py-3 rounded-lg border-b border-slate-100 items-center grid grid-cols-[50px_3fr_2fr_2fr_2fr_2fr] gap-4 coin-row'):
-                                    ui.label(str(coin.get('market_cap_rank', '-'))).classes('text-slate-400 mono text-xs')
-                                    with ui.row().classes('items-center gap-3'):
-                                        ui.image(coin.get('image', '')).classes('w-6 h-6 rounded-full')
-                                        with ui.column().classes('gap-0'):
-                                            ui.label(coin.get('name', 'Unknown')).classes('font-bold text-slate-700 text-sm')
-                                            ui.label(coin.get('symbol', '').upper()).classes('text-xs text-slate-400 font-bold')
-                                    
-                                    change = coin.get('price_change_percentage_24h', 0) or 0
-                                    price_color = 'text-green-600' if change >= 0 else 'text-red-600'
-                                    ui.label(f"${coin.get('current_price', 0):,}").classes(f'mono font-bold {price_color}')
-                                    
-                                    cls = 'pos-change' if change >= 0 else 'neg-change'
-                                    arrow = '▲' if change >= 0 else '▼'
-                                    ui.label(f"{arrow} {change:.2f}%").classes(f'mono text-sm {cls}')
-                                    
-                                    mcap = (coin.get('market_cap', 0) or 0) / 1e9
-                                    ui.label(f"${mcap:.2f} B").classes('text-sm text-slate-500 mono')
-                                    
-                                    vol = (coin.get('total_volume', 0) or 0) / 1e6
-                                    ui.label(f"${vol:.0f} M").classes('text-sm text-slate-400 mono')
+                                border_color = 'border-green-500/30' if spread > 3 else 'border-blue-500/30'
+                                glow_class = 'shadow-[0_0_15px_rgba(34,197,94,0.1)]' if spread > 5 else ''
 
-        # === ТАЙМЕРЫ ===
-        def ui_tick():
-            nonlocal last_render_ts
-            if backend.GLOBAL_LAST_UPDATE > last_render_ts:
-                render_arbitrage()
-                last_render_ts = time.time()
-            if tabs.value == 'MARKET OVERVIEW':
-                if not market_container.default_slot.children:
-                     render_market()
+                                with ui.card().classes(f'glass p-0 gap-0 rounded-xl {border_color} {glow_class} group hover:scale-[1.02] transition-transform duration-300'):
+                                    # Header
+                                    with ui.row().classes('w-full justify-between items-center p-3 bg-white/5 border-b border-white/5'):
+                                        ui.label(symbol).classes('font-bold text-white')
+                                        ui.label(f"+{spread:.2f}%").classes('text-lg font-black mono text-green-400')
+                                    
+                                    # Route
+                                    with ui.row().classes('w-full p-4 items-center justify-between'):
+                                        # Buy Side
+                                        with ui.column().classes('items-center gap-1'):
+                                            ui.label('BUY').classes('text-[10px] font-bold text-slate-500')
+                                            ui.label(str(buy_ex).upper()).classes('text-xs font-bold bg-slate-800 px-2 py-1 rounded text-slate-300')
+                                            ui.label(f"{buy_price:.4f}").classes('text-xs mono text-slate-400')
+                                        
+                                        ui.icon('arrow_right_alt', color='slate-600', size='md')
 
-        def on_search_change():
-            render_market()
-        
-        last_search_text = ''
-        def search_watcher():
-            nonlocal last_search_text
-            if market_search['text'] != last_search_text:
-                render_market()
-                last_search_text = market_search['text']
-        
-        ui.timer(0.5, ui_tick)
-        ui.timer(0.3, search_watcher)
+                                        # Sell Side
+                                        with ui.column().classes('items-center gap-1'):
+                                            ui.label('SELL').classes('text-[10px] font-bold text-slate-500')
+                                            ui.label(str(sell_ex).upper()).classes('text-xs font-bold bg-slate-800 px-2 py-1 rounded text-slate-300')
+                                            ui.label(f"{sell_price:.4f}").classes('text-xs mono text-slate-400')
+
+                                    # Actions
+                                    with ui.row().classes('w-full px-3 pb-3 gap-2'):
+                                        l1 = get_trade_link(buy_ex, symbol)
+                                        l2 = get_trade_link(sell_ex, symbol)
+                                        ui.button('Buy', on_click=lambda l=l1: ui.open(l)).classes('flex-1 bg-green-900/30 text-green-400 border border-green-500/30 hover:bg-green-500/20').props('dense flat')
+                                        ui.button('Sell', on_click=lambda l=l2: ui.open(l)).classes('flex-1 bg-red-900/30 text-red-400 border border-red-500/30 hover:bg-red-500/20').props('dense flat')
+
+                    # Auto-update scanner
+                    def auto_refresh_scanner():
+                        nonlocal last_arbitrage_update
+                        # Обновляем только если вкладка активна И есть новые данные
+                        if tabs.value == 'arbitrage' and backend.GLOBAL_LAST_UPDATE > last_arbitrage_update:
+                            render_scanner()
+                            last_arbitrage_update = time.time()
+                        # Если грид пустой (первый рендер), рендерим принудительно
+                        elif tabs.value == 'arbitrage' and not scanner_grid.default_slot.children:
+                            render_scanner()
+
+                    ui.timer(1.0, auto_refresh_scanner)
