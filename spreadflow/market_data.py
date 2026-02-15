@@ -1,52 +1,64 @@
 import asyncio
-import requests
-from nicegui import run
+import aiohttp
 from logger import log
+from config import DEFAULT_COINS  # Предполагаем, что в config есть список монет, если нет - используем дефолтный
 
-# Глобальное хранилище
-MARKET_DATA = []
+# --- ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ ДАННЫХ ---
+# Инициализируем пустым словарем, чтобы избежать AttributeError при импорте
+GLOBAL_MARKET_DATA = {}
 
-def fetch_coingecko_sync():
-    """Забирает данные о рынке (Топ 150)"""
-    url = "https://api.coingecko.com/api/v3/coins/markets"
-    params = {
-        "vs_currency": "usd",
-        "order": "market_cap_desc",
-        "per_page": 150, # <--- Увеличили до 150
-        "page": 1,
-        "sparkline": "false",
-        "price_change_percentage": "24h"
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+# API CoinGecko (или аналог)
+CG_API_URL = "https://api.coingecko.com/api/v3/coins/markets"
+
+async def fetch_market_data():
+    """
+    Асинхронное получение данных о рынке (цены, капа, объем).
+    Использует CoinGecko API.
+    """
+    global GLOBAL_MARKET_DATA
     
+    # Маппинг тикеров для CoinGecko (можно расширить)
+    # В реальном проекте лучше хранить это в БД или конфиге
+    params = {
+        'vs_currency': 'usd',
+        'order': 'market_cap_desc',
+        'per_page': 100,
+        'page': 1,
+        'sparkline': 'false'
+    }
+
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            log.info(f"📉 Market Data Updated: {len(data)} coins fetched")
-            return data
-        else:
-            log.error(f"📉 Market Data Failed: Status {response.status_code}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(CG_API_URL, params=params, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    
+                    # Преобразуем список в словарь для быстрого доступа по символу
+                    new_data = {}
+                    for item in data:
+                        symbol = item['symbol'].upper() + '/USDT' # Приводим к формату бирж
+                        new_data[symbol] = {
+                            'price': item.get('current_price', 0),
+                            'market_cap': item.get('market_cap', 0),
+                            'total_volume': item.get('total_volume', 0),
+                            'price_change_24h': item.get('price_change_percentage_24h', 0),
+                            'image': item.get('image', ''),
+                            'name': item.get('name', '')
+                        }
+                    
+                    GLOBAL_MARKET_DATA = new_data
+                    log.info(f"✅ Market Data Updated: {len(GLOBAL_MARKET_DATA)} coins")
+                else:
+                    log.warning(f"⚠️ Market Data API Error: {response.status}")
+                    
     except Exception as e:
-        log.error(f"📉 Market Data Error: {e}")
-    return []
+        log.error(f"❌ Market Data Fetch Error: {e}")
 
 async def market_service_task():
-    global MARKET_DATA
-    log.info("📉 Market Data Service Started")
-    
-    # Сразу при старте пробуем скачать
-    data = await run.io_bound(fetch_coingecko_sync)
-    if data: MARKET_DATA = data
-
+    """
+    Фоновая задача, которая обновляет данные раз в 60 секунд.
+    """
+    log.info("🚀 Market Data Service Started")
     while True:
-        try:
-            await asyncio.sleep(120) 
-            data = await run.io_bound(fetch_coingecko_sync)
-            if data:
-                MARKET_DATA = data
-        except Exception as e:
-            log.error(f"Market Loop Error: {e}")
-            await asyncio.sleep(60)
+        await fetch_market_data()
+        await asyncio.sleep(60) # Лимиты CoinGecko Free - аккуратнее с частотой
