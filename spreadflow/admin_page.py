@@ -5,10 +5,9 @@ from crud import (
     get_all_plans, update_plan_details, create_new_plan, delete_plan_db,
     get_user_active_sub, update_user_subscription_settings, delete_invite_db,
     get_all_tickets, update_ticket_status, delete_ticket_db,
-    update_user_role # <--- Импортируем функцию смены роли
+    update_user_role, update_user_details, delete_user_db
 )
 from logger import log
-# === ДОБАВЛЕНО: Импорт моделей для удаления юзера ===
 from models import User, Subscription, ActivityLog, Payment, AdminNote, SupportTicket
 
 def create_admin_routes():
@@ -29,10 +28,10 @@ def create_admin_routes():
 
         log.info(f"ACCESS GRANTED: {current_role.upper()} '{current_user}' entered the dashboard.")
 
-        # --- СТИЛИ ---
+        # --- СТИЛИ (UI/UX) ---
         ui.add_head_html('''
         <style>
-            body { background-color: #f1f5f9; font-family: 'Inter', sans-serif; }
+            body { background-color: #f8fafc; font-family: 'Inter', sans-serif; }
             .admin-card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
             .pricing-card-admin { 
                 border: 1px solid #e2e8f0; border-radius: 16px; background: white;
@@ -54,14 +53,35 @@ def create_admin_routes():
         with ui.header().classes('bg-slate-900 text-white px-8 py-4 flex justify-between items-center shadow-lg'):
             with ui.row().classes('items-center gap-3'):
                 ui.icon('admin_panel_settings', size='md', color='blue-400')
-                ui.label('GOD MODE').classes('font-black tracking-widest text-lg')
+                with ui.column().classes('gap-0'):
+                    ui.label('GOD MODE').classes('font-black tracking-widest text-lg leading-tight')
+                    ui.label('Control Center').classes('text-xs text-slate-400 font-bold uppercase tracking-widest')
+                
                 if current_role == 'moderator':
-                    ui.badge('MODERATOR', color='green').classes('text-xs')
-            ui.button('EXIT', icon='logout', on_click=lambda: ui.navigate.to('/')).props('flat color=white dense')
+                    ui.badge('MODERATOR', color='green').classes('text-xs ml-2')
+            
+            with ui.row().classes('items-center gap-4'):
+                ui.label(current_user).classes('font-bold text-sm')
+                ui.button('EXIT', icon='logout', on_click=lambda: ui.navigate.to('/')).props('flat color=white dense')
 
         # --- CONTENT ---
         with ui.column().classes('w-full p-8 max-w-7xl mx-auto gap-8'):
             
+            # KPI CARDS
+            with ui.grid(columns=4).classes('w-full gap-4'):
+                def kpi_card(title, val, icon, color):
+                    with ui.card().classes(f'border-l-4 border-{color}-500 shadow-sm'):
+                        with ui.row().classes('justify-between items-center w-full'):
+                            with ui.column().classes('gap-1'):
+                                ui.label(title).classes('text-xs font-bold text-slate-400 uppercase')
+                                ui.label(str(val)).classes('text-2xl font-black text-slate-800')
+                            ui.icon(icon, color=f'{color}-500', size='md').classes('opacity-20')
+                
+                kpi_card('Users', stats.get('total_users', 0), 'group', 'blue')
+                kpi_card('Active Subs', stats.get('active_subs', 0), 'workspace_premium', 'green')
+                kpi_card('Revenue', f"${stats.get('total_revenue', 0):.0f}", 'payments', 'amber')
+                kpi_card('Support', stats.get('pending_tickets', 0), 'support_agent', 'red')
+
             # TABS
             with ui.tabs().classes('w-full bg-white rounded-t-xl text-slate-900 border-b') as tabs:
                 t_users = ui.tab('Пользователи', icon='group')
@@ -76,7 +96,9 @@ def create_admin_routes():
                 # TAB 1: USERS
                 # ==============================================================================
                 with ui.tab_panel(t_users):
-                    ui.label('Управление Пользователями').classes('text-xl font-bold mb-4')
+                    with ui.row().classes('justify-between items-center w-full mb-4'):
+                        ui.label('Управление Пользователями').classes('text-xl font-bold text-slate-800')
+                        # Search logic could be added here
 
                     # --- ДИАЛОГ РЕДАКТИРОВАНИЯ ЮЗЕРА ---
                     user_edit_dialog = ui.dialog()
@@ -88,6 +110,10 @@ def create_admin_routes():
                             # Получаем юзера (для роли) и подписку
                             user_obj = db.query(User).filter(User.id == user_id).first()
                             sub = get_user_active_sub(db, user_id)
+                            
+                            # ДИНАМИЧЕСКИЕ ТАРИФЫ (Fix)
+                            all_plans_objs = get_all_plans(db)
+                            plan_names = [p.name for p in all_plans_objs]
                             
                             current_plan = sub.plan_name if sub else 'FREE'
                             current_role_val = user_obj.role if user_obj else 'user'
@@ -106,9 +132,9 @@ def create_admin_routes():
                             
                             ui.separator().classes('mb-4')
 
-                            # 1. Основной тариф
+                            # 1. Основной тариф (ДИНАМИЧЕСКИЙ СПИСОК)
                             ui.label('Базовый Тариф').classes('text-xs text-gray-400 uppercase font-bold')
-                            plan_select = ui.select(['FREE', 'START', 'PRO', 'WHALE'], value=current_plan).classes('w-full mb-6')
+                            plan_select = ui.select(plan_names, value=current_plan).classes('w-full mb-6')
                             
                             ui.separator().classes('mb-4')
                             
@@ -219,7 +245,7 @@ def create_admin_routes():
                         {'name': 'actions', 'label': 'ACTIONS', 'field': 'actions', 'align': 'center'},
                     ]
                     
-                    users_table = ui.table(columns=cols, rows=[], pagination=10).classes('w-full')
+                    users_table = ui.table(columns=cols, rows=[], pagination=10).classes('w-full custom-table')
                     
                     def refresh_users_table():
                         db = next(get_db())
@@ -288,7 +314,7 @@ def create_admin_routes():
                 # ==============================================================================
                 with ui.tab_panel(t_plans):
                     with ui.row().classes('w-full justify-between items-center mb-6'):
-                        ui.label('Конструктор Тарифов').classes('text-xl font-bold')
+                        ui.label('Конструктор Тарифов').classes('text-xl font-bold text-slate-800')
                         
                         with ui.dialog() as create_diag, ui.card():
                             ui.label('Новый Тариф').classes('font-bold mb-2')
@@ -296,7 +322,7 @@ def create_admin_routes():
                             n_price = ui.input('Цена', placeholder="$99")
                             n_spread = ui.number('Макс Спред (%)', value=5)
                             n_speed = ui.number('Скорость (сек)', value=5)
-                            n_color = ui.select(['gray', 'blue', 'green', 'purple', 'red', 'amber'], value='gray')
+                            n_color = ui.select(['gray', 'blue', 'green', 'purple', 'red', 'amber'], value='gray', label='Цвет карточки')
                             
                             def do_create():
                                 db = next(get_db())
@@ -310,9 +336,9 @@ def create_admin_routes():
                                 finally:
                                     db.close()
                                 
-                            ui.button('СОЗДАТЬ', on_click=do_create).classes('bg-black text-white w-full mt-2')
+                            ui.button('СОЗДАТЬ', on_click=do_create).classes('bg-slate-900 text-white w-full mt-2')
                         
-                        ui.button('ДОБАВИТЬ ТАРИФ', icon='add', on_click=create_diag.open).props('unelevated color=black')
+                        ui.button('ДОБАВИТЬ ТАРИФ', icon='add', on_click=create_diag.open).classes('bg-slate-900 text-white shadow-md')
 
                     plans_container = ui.row().classes('w-full gap-6 items-stretch wrap')
 
@@ -322,8 +348,8 @@ def create_admin_routes():
                         edit_plan_dialog.clear()
                         current_features = list(p.description_features) if p.description_features else []
                         
-                        with edit_plan_dialog, ui.card().classes('w-[600px] p-0 gap-0'):
-                            with ui.row().classes(f'w-full bg-{p.css_color}-600 p-4 justify-between items-center text-white rounded-t'):
+                        with edit_plan_dialog, ui.card().classes('w-[600px] p-0 gap-0 overflow-hidden'):
+                            with ui.row().classes(f'w-full bg-{p.css_color}-600 p-4 justify-between items-center text-white'):
                                 ui.label(f'EDITING: {p.name}').classes('font-bold text-lg')
                                 ui.icon('edit', color='white')
 
@@ -402,8 +428,8 @@ def create_admin_routes():
                                         db.close()
 
                                 with ui.row().classes('w-full gap-4 mt-4'):
-                                    ui.button('DELETE', on_click=do_delete_plan).classes('bg-red-100 text-red-600 w-1/3')
-                                    ui.button('SAVE', on_click=do_save_plan).classes('flex-1 bg-slate-900 text-white')
+                                    ui.button('DELETE', on_click=do_delete_plan).classes('bg-red-100 text-red-600 w-1/3 shadow-none hover:bg-red-200')
+                                    ui.button('SAVE', on_click=do_save_plan).classes('flex-1 bg-slate-900 text-white shadow-md')
 
                         edit_plan_dialog.open()
 
@@ -423,11 +449,16 @@ def create_admin_routes():
                                         ui.label(p.name).classes(f'text-lg font-black text-{p.css_color}-600 uppercase')
                                         if not p.is_public:
                                             ui.label('HIDDEN').classes('text-[10px] bg-gray-200 px-2 rounded font-bold')
-                                    ui.label(p.price_str).classes('text-3xl font-bold mt-2')
+                                    
+                                    ui.label(p.price_str).classes('text-3xl font-bold mt-2 text-slate-800')
+                                    ui.label('per ' + p.period_str).classes('text-xs text-slate-400 mb-4')
+
                                     with ui.column().classes('gap-1 mb-4'):
-                                        ui.label(f"Spread: {p.max_spread}%").classes('text-xs bg-gray-100 px-2 py-1 rounded')
+                                        ui.label(f"Spread: {p.max_spread}%").classes('text-xs bg-gray-100 px-2 py-1 rounded w-fit')
+                                        ui.label(f"Speed: {p.refresh_rate}s").classes('text-xs bg-gray-100 px-2 py-1 rounded w-fit')
+                                    
                                     ui.space()
-                                    ui.button('EDIT', icon='edit', on_click=lambda _, plan=p: open_plan_edit(plan)).props('flat color=grey w-full')
+                                    ui.button('EDIT', icon='edit', on_click=lambda _, plan=p: open_plan_edit(plan)).classes(f'w-full bg-{p.css_color}-50 text-{p.css_color}-700 hover:bg-{p.css_color}-100 shadow-none')
 
                     load_plans_ui()
 
@@ -436,19 +467,29 @@ def create_admin_routes():
                 # ==============================================================================
                 with ui.tab_panel(t_invites):
                     ui.label('Генератор Инвайтов').classes('text-lg font-bold mb-4')
-                    with ui.row().classes('gap-2 items-end mb-4'):
-                        ic = ui.input('Код (напр. PRO-FREE)')
-                        ip = ui.select(['FREE', 'START', 'PRO', 'WHALE'], value='PRO')
-                        il = ui.number('Лимит использований', value=1)
+                    with ui.row().classes('gap-4 items-end mb-6 p-4 bg-slate-50 rounded-lg border'):
+                        ic = ui.input('Код (напр. PRO-FREE)').classes('bg-white rounded px-2')
+                        
+                        # ДИНАМИЧЕСКИЙ ВЫБОР ТАРИФА (Fix)
+                        db_local = next(get_db())
+                        try:
+                            plan_opts = [p.name for p in get_all_plans(db_local)]
+                            default_plan = plan_opts[0] if plan_opts else 'FREE'
+                        finally:
+                            db_local.close()
+                            
+                        ip = ui.select(plan_opts, value=default_plan, label='Тариф').classes('w-40 bg-white rounded px-2')
+                        il = ui.number('Лимит использований', value=1).classes('bg-white rounded px-2')
+                        
                         def gen_inv():
                             db=next(get_db())
                             try:
                                 create_invite_db(db, ic.value, ip.value, int(il.value))
-                                ui.notify('Инвайт создан')
+                                ui.notify('Инвайт создан', type='positive')
                                 refresh_invites()
                             finally:
                                 db.close()
-                        ui.button('Generate', on_click=gen_inv).classes('bg-slate-900 text-white')
+                        ui.button('Generate', on_click=gen_inv).classes('bg-slate-900 text-white h-10 shadow-md')
                     
                     inv_cols = [
                         {'name': 'code', 'label': 'CODE', 'field': 'code', 'align': 'left'},
@@ -457,7 +498,7 @@ def create_admin_routes():
                         {'name': 'status', 'label': 'STATUS', 'field': 'status', 'align': 'center'},
                         {'name': 'actions', 'label': 'DEL', 'field': 'actions', 'align': 'center'},
                     ]
-                    inv_table = ui.table(columns=inv_cols, rows=[]).classes('w-full')
+                    inv_table = ui.table(columns=inv_cols, rows=[]).classes('w-full custom-table')
                     
                     def delete_invite_handler(inv_id):
                         db = next(get_db())
@@ -508,7 +549,7 @@ def create_admin_routes():
                         {'name': 'actions', 'label': 'ACTIONS', 'field': 'actions', 'align': 'center'},
                     ]
                     
-                    tickets_table = ui.table(columns=t_cols, rows=[], pagination=10).classes('w-full')
+                    tickets_table = ui.table(columns=t_cols, rows=[], pagination=10).classes('w-full custom-table')
                     read_ticket_dialog = ui.dialog()
                     selected_ticket = {'id': None}
                     
@@ -591,7 +632,7 @@ def create_admin_routes():
                 with ui.tab_panel(t_logs):
                      ui.label('Системные логи').classes('text-lg font-bold mb-4')
                      log_cols = [{'name': 'time', 'label': 'TIME', 'field': 'time', 'align': 'left'}, {'name': 'user', 'label': 'USER', 'field': 'user', 'align': 'left'}, {'name': 'action', 'label': 'ACTION', 'field': 'action', 'align': 'left'}]
-                     log_table = ui.table(columns=log_cols, rows=[]).classes('w-full')
+                     log_table = ui.table(columns=log_cols, rows=[]).classes('w-full custom-table')
                      def refresh_logs():
                          db = next(get_db())
                          try:
